@@ -1,0 +1,17 @@
+header:
+  company_name: DEMO CONTROLS
+  company_subtitle: 示例温控器工厂
+  doc_title: 作业指导书
+  doc_title_en: Working Instruction
+  file_no: WI-DEMO-W-XXXX-2024
+  edition: A
+  product_spec: 新产品系列
+  product_spec_cn: 新产品作业指导书
+  made_by: 编制人
+  checked_by: 审核人
+  approved_by: 批准人
+  issued_date: '2024-01-15'
+  revision_history: []
+  note: (★) Means key processes 表示关键工序
+processes: []
+change_records: []

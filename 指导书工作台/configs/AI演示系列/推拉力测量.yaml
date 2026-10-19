@@ -1,0 +1,73 @@
+header:
+  company_name: DEMO CONTROLS
+  company_subtitle: 示例温控器工厂
+  doc_title: 作业指导书
+  doc_title_en: Working Instruction
+  file_no: WI-AI-DEMO-003
+  edition: A
+  product_spec: Push-pull force testing (AI demo)
+  product_spec_cn: 推拉力测量（AI起草演示）
+  made_by: AI起草
+  checked_by: ''
+  approved_by: ''
+  issued_date: '2026-10-03'
+  revision_history:
+  - date: '2026-10-03'
+    content: 视频抽帧+AI起草自动生成演示
+    author: AI
+  note: (★) Means key processes 表示关键工序
+processes:
+- process_no: '10'
+  process_name: Push-pull force testing
+  process_name_cn: 推拉力测量
+  work_hours: 77
+  work_hours_display: 77秒
+  page_no: 1
+  video_no: ''
+  steps:
+  - step_no: 1
+    content: 将测试件放置于推拉力测试机的夹具中并固定
+    content_en: Place the tested part into the fixture of the push-pull force tester and secure it
+    images:
+    - 素材图片/VID_20260930_140318/frame_001.jpg
+    - 素材图片/VID_20260930_140318/frame_003.jpg
+    - 素材图片/VID_20260930_140318/frame_005.jpg
+  - step_no: 2
+    content: 将推拉力计清零，转动手柄使测头接触测试件开始测试
+    content_en: Zero the force gauge, then turn the handle to bring the sensor head into contact with the part to start the test
+    images:
+    - 素材图片/VID_20260930_140318/frame_007.jpg
+    - 素材图片/VID_20260930_140318/frame_009.jpg
+    - 素材图片/VID_20260930_140318/frame_011.jpg
+  - step_no: 3
+    content: 测试完成后取下测试件，将读数记录于点检表
+    content_en: After the test, remove the part and record the reading on the inspection sheet
+    images:
+    - 素材图片/VID_20260930_140318/frame_013.jpg
+    - 素材图片/VID_20260930_140318/frame_015.jpg
+    - 素材图片/VID_20260930_140318/frame_017.jpg
+  - step_no: 4
+    content: 更换下一个测试件，重复上述测试
+    content_en: Replace with the next part and repeat the measurement above
+    images:
+    - 素材图片/VID_20260930_140318/frame_019.jpg
+    - 素材图片/VID_20260930_140318/frame_021.jpg
+    - 素材图片/VID_20260930_140318/frame_023.jpg
+  accessories: ''
+  materials: []
+  equipment:
+  - code: ''
+    name: 数显推拉力计DIGITAL FORCE GAUGE
+    operating_time: 校准有效期内
+  - code: ''
+    name: 推拉力测试台TEST STAND
+    operating_time: ''
+  qc_items:
+  - item: 推拉力读数
+    spec: 按图纸/检验标准
+    parameter: 现读取，记录于点检表
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+change_records: []

@@ -1,0 +1,70 @@
+header:
+  company_name: (演示) XX精密科技有限公司
+  company_subtitle: ''
+  doc_title: 作业指导书
+  doc_title_en: WORK INSTRUCTION
+  file_no: WI-AI-DEMO-002
+  edition: A0
+  product_spec: Height gauge measuring (AI demo v2)
+  product_spec_cn: 高度规测量（AI起草演示·方案2）
+  made_by: AI起草
+  checked_by: ''
+  approved_by: ''
+  issued_date: '2026-10-03'
+  revision_history:
+  - date: '2026-10-03'
+    content: 12帧合并为4步×3图，AI起草，待人工核对
+    author: AI
+  note: 本文件由 视频→抽帧→AI看图起草 自动生成，步骤文字为草稿，需人工校对
+processes:
+- process_no: '10'
+  process_name: Height gauge measuring
+  process_name_cn: 高度规测量
+  work_hours: 61
+  work_hours_display: 约61秒
+  page_no: 1
+  video_no: 测试用视频.mp4
+  steps:
+  - step_no: 1
+    content: 将零件放置在测量平台上
+    content_en: ''
+    images:
+    - 素材图片/测试用视频/frame_001.jpg
+    - 素材图片/测试用视频/frame_002.jpg
+    - 素材图片/测试用视频/frame_003.jpg
+  - step_no: 2
+    content: 转动高度规测头直至接触被测物体
+    content_en: ''
+    images:
+    - 素材图片/测试用视频/frame_004.jpg
+    - 素材图片/测试用视频/frame_005.jpg
+    - 素材图片/测试用视频/frame_006.jpg
+  - step_no: 3
+    content: 记录高度规显示的测量值到表格中
+    content_en: ''
+    images:
+    - 素材图片/测试用视频/frame_007.jpg
+    - 素材图片/测试用视频/frame_008.jpg
+    - 素材图片/测试用视频/frame_009.jpg
+  - step_no: 4
+    content: 调整高度规测量数值并记录
+    content_en: ''
+    images:
+    - 素材图片/测试用视频/frame_010.jpg
+    - 素材图片/测试用视频/frame_011.jpg
+    - 素材图片/测试用视频/frame_012.jpg
+  accessories: ''
+  materials: []
+  equipment:
+  - code: ''
+    name: 数显高度规
+    operating_time: DIGITAL HEIGHT GAUGE
+  qc_items:
+  - item: 测量读数
+    spec: 按图纸公差
+    parameter: 高度规读取，记录于点检表
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+change_records: []

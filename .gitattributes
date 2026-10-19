@@ -1,0 +1,25 @@
+# 本机是 Windows 工作目录，统一按 CRLF 存，避免每次 checkout 把源文件行尾改掉。
+# xlsx / 图片 / 视频 一律按二进制处理，绝不让 git 动字节。
+*.py    text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.md    text eol=crlf
+*.txt   text eol=crlf
+*.yaml  text eol=crlf
+*.yml   text eol=crlf
+*.json  text eol=crlf
+*.ts    text eol=crlf
+*.tsx   text eol=crlf
+*.mjs   text eol=crlf
+*.html  text eol=crlf
+*.css   text eol=crlf
+*.xlsx  binary
+*.xls   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.mp4   binary
+*.zip   binary
+*.exe   binary
+*.cer   binary

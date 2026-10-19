@@ -1,0 +1,98 @@
+header:
+  company_name: DEMO CONTROLS
+  company_subtitle: 示例温控器工厂
+  doc_title: 作业指导书
+  doc_title_en: Working Instruction
+  file_no: WI-DEMO-W-0183-2024
+  edition: A
+  product_spec: demo series controller
+  product_spec_cn: 演示系列组件作业指导书
+  made_by: 张三
+  checked_by: 李四
+  approved_by: 王五
+  issued_date: '2026-10-02'
+  revision_history:
+  - date: '2024-01-15'
+    content: Initial release
+    author: 张三
+  - date: '2024-03-20'
+    content: Updated vacuum value 50Pa->1000Pa
+    author: 李四
+  note: (★) Means key processes 表示关键工序
+processes:
+- process_no: DEMO-1
+  process_name: Stamping DEMO000AA0001A
+  process_name_cn: 冲压 DEMO000AA0001A
+  work_hours: 56
+  work_hours_display: 56秒
+  page_no: 1
+  video_no: ''
+  steps:
+  - step_no: 1
+    content: 将材料 BA13010DEMOB003A 放置精密矫正机前，需将百分表调零
+    content_en: Before putting material BA13010DEMOB003A on straightening machine, adjust
+      dial gauge to 0
+    images: []
+  - step_no: 2
+    content: 调零完成后，将材料放入矫正机，通过时百分表显示 0.2 状态
+    content_en: After zeroing, put material in machine, gauge should show 0.2 when
+      passing through
+    images: []
+  - step_no: 3
+    content: 取出材料，目视检查表面无划伤、变形
+    content_en: Take out material, visual inspect surface no scratch/deformation
+    images: []
+  accessories: ''
+  materials:
+  - code: BA13010DEMOB003A
+    name: SUS301
+    spec: 0.1mm
+    qty: 1
+    unit: PCS
+  equipment:
+  - code: F0733-01
+    name: 精密矫正仪
+    operating_time: 压力表 0.2MPa
+  qc_items:
+  - item: 材料平整度
+    spec: ≤0.2mm
+    parameter: 百分表测量
+  - item: 表面质量
+    spec: 无划伤/变形
+    parameter: 目视全检
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+- process_no: DEMO-2
+  process_name: Stamping DEMO000AA0006A
+  process_name_cn: 冲压 DEMO000AA0006A
+  work_hours: 48
+  work_hours_display: 48秒
+  page_no: 2
+  video_no: ''
+  steps:
+  - step_no: 1
+    content: 第二冲压工序...
+    content_en: Second stamping process...
+    images: []
+  accessories: ''
+  materials:
+  - code: BA13010DEMOB004A
+    name: SUS304
+    spec: 0.15mm
+    qty: 1
+    unit: PCS
+  equipment:
+  - code: F0733-02
+    name: 精密冲床
+    operating_time: 冲压力 2.5T
+  qc_items:
+  - item: 尺寸精度
+    spec: ±0.05mm
+    parameter: 投影仪测量
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+change_records: []

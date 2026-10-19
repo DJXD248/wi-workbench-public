@@ -1,0 +1,94 @@
+header:
+  company_name: DEMO CONTROLS
+  company_subtitle: 示例温控器工厂
+  doc_title: 作业指导书
+  doc_title_en: Working Instruction
+  file_no: WI-DEMO-0002
+  edition: B
+  product_spec: DEMOA2Q0000HIS01
+  product_spec_cn: DEMOA 焊接作业指导书
+  made_by: 张三
+  checked_by: 李四
+  approved_by: 王五
+  issued_date: '2026-10-02'
+  revision_history:
+  - date: '2021-03-09'
+    content: Initial release
+    author: 张三
+  - date: '2022-06-15'
+    content: DEMOA-4 删除焊枪气体压力值
+    author: 张三
+  note: (★) Means key processes 表示关键工序
+processes:
+- process_no: DEMOA-1
+  process_name: Laser printing production cycle & batch barcode
+  process_name_cn: 激光打印生产周期及批号条码
+  work_hours: 56
+  work_hours_display: 56秒
+  page_no: 1
+  video_no: ''
+  steps:
+  - step_no: 1
+    content: 激光打印机设置参数
+    content_en: Set laser printer parameters
+    images: []
+  - step_no: 2
+    content: 扫描工单条码
+    content_en: Scan work order barcode
+    images: []
+  - step_no: 3
+    content: 确认打印内容正确
+    content_en: Verify print content correct
+    images: []
+  accessories: ''
+  materials: []
+  equipment:
+  - code: EQ-0001
+    name: 激光打印机
+    operating_time: 功率 20W
+  qc_items:
+  - item: 打印清晰度
+    spec: 字符完整可读
+    parameter: 目视检查
+  - item: 条码扫描率
+    spec: 100% 可读
+    parameter: 扫码枪验证
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+- process_no: DEMOA-2
+  process_name: Rolling
+  process_name_cn: 卷板
+  work_hours: 120
+  work_hours_display: 120秒
+  page_no: 2
+  video_no: ''
+  steps:
+  - step_no: 1
+    content: 卷板机调整间隙
+    content_en: Adjust rolling machine gap
+    images: []
+  - step_no: 2
+    content: 送料卷制
+    content_en: Feed and roll
+    images: []
+  - step_no: 3
+    content: 检查圆度
+    content_en: Check roundness
+    images: []
+  accessories: ''
+  materials: []
+  equipment:
+  - code: F0832-01
+    name: 卷板机
+    operating_time: 间隙 1.2mm
+  qc_items:
+  - item: 圆度
+    spec: ≤0.1mm
+    parameter: 圆度仪测量
+  made_by: ''
+  checked_by: ''
+  approved_by: ''
+  process_date: ''
+change_records: []

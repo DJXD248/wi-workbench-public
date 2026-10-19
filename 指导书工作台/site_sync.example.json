@@ -1,0 +1,5 @@
+{
+  "_comment": "示例文件：复制成 site_sync.json 后填真实值。真实口令文件已被 .gitignore 排除，不要提交。url 末尾固定是 /functions/v1/app/snapshot。",
+  "url": "https://<你的看板站点域名>/functions/v1/app/snapshot",
+  "token": "请替换成看板站点的同步口令（WI_SYNC_TOKEN）"
+}

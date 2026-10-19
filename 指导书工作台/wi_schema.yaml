@@ -1,0 +1,95 @@
+# ============================================================
+# 作业指导书统一数据模型 (WiDataModel v1.0)
+# 兼容：演示系列、焊接系列、通用装配/检测类
+# 所有字段对应标准版头文件《作业指导书版头.xlsx》4个Sheet
+# ============================================================
+
+# ------------------------------------------------------------
+# Sheet 1: 文档基本信息 + 版头区 + 变更记录
+# ------------------------------------------------------------
+header:
+  # 公司/品牌区 (Row 1-3)
+  company_name: "DEMO CONTROLS"              # 公司名（中英对照）
+  company_subtitle: "示例温控器工厂"            # 子标题/工厂名
+  doc_title: "作业指导书"                      # 文档标题
+  doc_title_en: "Working Instruction"         # 英文标题
+  
+  # 文档编号区 (Row 2-4)
+  file_no: "WI-DEMO-W-0183-2024"             # 文件编号
+  edition: "A"                                 # 版本号
+  product_spec: "demo series controller"            # 产品规格/系列
+  product_spec_cn: "演示系列组件作业指导书"    # 产品规格中文
+  
+  # 审批区 (Row 3-4)
+  made_by: ""                                  # 编制人
+  checked_by: ""                               # 审核人
+  approved_by: ""                              # 批准人
+  issued_date: ""                              # 发放日期 (YYYY-MM-DD)
+  
+  # 变更记录区 (Row 8-12, 可多行)
+  revision_history: []                         # 列表，每项含 date, content, author
+  
+  # 备注
+  note: "(★) Means key processes 表示关键工序"
+
+
+# ------------------------------------------------------------
+# Sheet 2: 工序主表 + 步骤详情 + 物料/设备/质检
+# (每个工序对应一个 Sheet2 结构，实际生成时按工序数量复制)
+# ------------------------------------------------------------
+process_template:
+  # 工序基本信息 (Row 1-4)
+  process_no: "DEMO-1"                           # 工序号
+  process_name: "Stamping DEMO000AA0001A"       # 工位名称
+  process_name_cn: "冲压 DEMO000AA0001A"         # 工位名称中文
+  work_hours: 56                               # 工时(秒)
+  work_hours_display: "56秒"                   # 显示用工时文本
+  page_no: 1                                   # 页码
+  video_no: ""                                 # 对应工位视频编号
+  
+  # 步骤详情区 (Row 5-12, 支持最多 6 步)
+  steps: []                                    # 列表，每项含 step_no, content, content_cn
+  
+  # 附属文件区 (Row 13)
+  accessories: ""                              # 附属文件编号/名称
+  
+  # 物料/辅料区 (Row 15-26, 表头 Row 14)
+  materials: []                                # 列表，每项含 code, name, spec, qty, unit
+  
+  # 设备/工夹具区 (Row 15-26, 与物料共用行)
+  equipment: []                                # 列表，每项含 code, name, operating_time
+  
+  # 质检项目区 (Row 28-42)
+  qc_items: []                                 # 列表，每项含 item, spec, parameter
+  
+  # 页脚签名区 (Row 43-44)
+  # Made by / Checked by / Approved by / Date (继承自 header)
+
+
+# ------------------------------------------------------------
+# Sheet 3: 另一种工序详情页 (结构同 Sheet 2，表头略有差异)
+# 实际使用时按模板类型选择 Sheet2 或 Sheet3
+# ------------------------------------------------------------
+process_template_alt:
+  # 字段同 process_template，仅表头标签不同
+  pass
+
+
+# ------------------------------------------------------------
+# Sheet 4: 变更记录详细表 / 签名确认表
+# ------------------------------------------------------------
+change_record:
+  records: []                                  # 每项：modification, checked_by, approved_by, date
+
+
+# ------------------------------------------------------------
+# 完整文档模型：一个作业指导书 = header + 多个 process
+# ------------------------------------------------------------
+work_instruction:
+  header: {}                                   # 引用 header 结构
+  processes: []                                # 列表，每项引用 process_template 结构
+  change_records: []                           # 列表，每项引用 change_record 结构
+  
+  # 计算字段（生成时自动填充）
+  total_work_hours: 0                          # 合计工时(秒)
+  total_pages: 1                               # 总页数

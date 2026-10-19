@@ -1,0 +1,13 @@
+# 作业指导书工作台 运行依赖（2026-10-19 按本机 pip list 实测版本锁定）
+# 安装：python -m pip install -r requirements.txt
+# 国内网络：python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+openpyxl==3.1.5          # 读写 xlsx（核心）。注意不是 3.14，图片 anchor 行为以此版本为准
+PyYAML==6.0.3            # 解析 configs/ 下的 YAML
+Pillow==12.3.0           # 读取配图尺寸，按比例嵌入
+imageio-ffmpeg==0.6.0    # 自带 ffmpeg 二进制，视频抽帧用，免安装系统 ffmpeg
+requests==2.34.2         # AI 起草调用大模型 API + 云端看板同步
+
+# ---- 以下不是运行必需，只在特定任务时装 ----
+# pyinstaller==6.22.3    # 重新打包 exe（云端任务做不了签名，见交接文档 §12）
+# pymupdf==1.28.2        # 本机视觉验收：WPS 导出 PDF 后转 PNG 预览
