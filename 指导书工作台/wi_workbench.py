@@ -437,6 +437,24 @@ class App(tk.Tk):
                    command=self.run_normalize).grid(row=2, column=1, sticky="w", pady=(8, 0))
         g1.columnconfigure(1, weight=1)
 
+        g1b = ttk.LabelFrame(tab, text="一句话需求（大白话批量改，改完自动登记变更）", padding=10)
+        g1b.pack(fill="x", pady=(0, 12))
+        ttk.Label(g1b, text="要改的文件：").grid(row=0, column=0, sticky="e")
+        self.cr_in = tk.StringVar()
+        ttk.Entry(g1b, textvariable=self.cr_in, width=60).grid(row=0, column=1, sticky="we", padx=4)
+        ttk.Button(g1b, text="浏览…", command=self.pick_cr_in).grid(row=0, column=2)
+        ttk.Label(g1b, text="一句话：").grid(row=1, column=0, sticky="e", pady=(6, 0))
+        self.cr_say = tk.StringVar()
+        ttk.Entry(g1b, textvariable=self.cr_say, width=60).grid(row=1, column=1, sticky="we", padx=4, pady=(6, 0))
+        ttk.Button(g1b, text="先看会改哪里", command=self.run_cr_preview).grid(row=1, column=2, pady=(6, 0))
+        self.cr_pending = []
+        self.cr_img_label = ttk.Label(g1b, text="配图更换：未挂任何换图项")
+        self.cr_img_label.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Button(g1b, text="挂一张换图…", command=self.pick_cr_image).grid(row=2, column=2, pady=(6, 0))
+        ttk.Button(g1b, text="执行（原文件不动，另存副本到 成品/）",
+                   command=self.run_change_request).grid(row=3, column=1, sticky="w", pady=(8, 0))
+        g1b.columnconfigure(1, weight=1)
+
         g2 = ttk.LabelFrame(tab, text="快速操作", padding=10)
         g2.pack(fill="x")
         ttk.Button(g2, text="生成演示示例文件（DEMOB + 焊接）", command=self.run_demo).pack(anchor="w", pady=2)
@@ -738,6 +756,148 @@ class App(tk.Tk):
             })
             self.dirty = bool(yaml_path is None)
             self._update_file_label()
+
+    # ---------- 一句话需求 ----------
+    def pick_cr_in(self):
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = filedialog.askopenfilename(title="选要修改的指导书文件",
+                                         initialdir=str(OUTPUT_DIR),
+                                         filetypes=[("Excel", "*.xlsx")])
+        if path:
+            self.cr_in.set(path)
+
+    def _cr_src(self):
+        src = self.cr_in.get().strip().strip('"')
+        if not src or not Path(src).exists():
+            messagebox.showinfo("提示", "请先选择要修改的文件（成品/ 里的，或规范化出来的那份）")
+            return None
+        return src
+
+    def _cr_pending_text(self):
+        if not self.cr_pending:
+            return "配图更换：未挂任何换图项"
+        return "配图更换：已挂 {} 项（执行时一起生效）\n    ".format(len(self.cr_pending)) + \
+               "\n    ".join(f"· {s} 图#{i + 1} → {Path(p).name}" for s, i, p in self.cr_pending)
+
+    def _cr_refresh_pending(self):
+        if hasattr(self, "cr_img_label"):
+            self.cr_img_label.config(text=self._cr_pending_text())
+
+    def run_cr_preview(self):
+        src = self._cr_src()
+        if not src:
+            return
+        say = self.cr_say.get().strip()
+        try:
+            import change_request as cr
+            rep = cr.plan(src, say)
+        except Exception as e:
+            messagebox.showerror("预览失败", str(e))
+            return
+        text = rep.preview_text()
+        if self.cr_pending:
+            text += "\n\n另外挂着这些换图：\n    " + "\n    ".join(
+                f"· {s} 图#{i + 1} → {Path(p).name}" for s, i, p in self.cr_pending)
+        messagebox.showinfo("先看会改哪里", text)
+        self.status.set("一句话需求：已预览")
+
+    def run_change_request(self):
+        src = self._cr_src()
+        if not src:
+            return
+        say = self.cr_say.get().strip()
+        if not say and not self.cr_pending:
+            messagebox.showinfo("提示", "一句话和换图至少得有一项")
+            return
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            import change_request as cr
+            rep = cr.run(src, say, out_dir=str(OUTPUT_DIR),
+                         image_ops=list(self.cr_pending))
+        except Exception as e:
+            messagebox.showerror("执行失败", f"{e}\n\n（原文件没有被改动）")
+            return
+        if not rep.output:
+            messagebox.showwarning("没有改动可保存",
+                                   "这句话在这份文件里一处都没命中，换图也没挂上，所以没有写出新文件。\n"
+                                   "请把要改的原话贴准一点（可以从单元格里原样复制一段）。")
+            return
+        self.cr_pending.clear()
+        self._cr_refresh_pending()
+        detail = "\n".join(f"· {cr._page_label(ed)} {ed.summary()}"
+                           for ed in rep.edits if ed.hits)
+        reg = "\n".join("· " + n for n in rep.notes)
+        messagebox.showinfo(
+            "改好了",
+            f"原文件没动，新文件：\n{rep.output}\n\n【实际改动】\n{detail or '（只换了图）'}"
+            f"\n\n【变更登记】\n{reg}")
+        self.status.set(f"一句话需求完成: {Path(rep.output).name}")
+
+    def pick_cr_image(self):
+        src = self._cr_src()
+        if not src:
+            return
+        import change_request as cr
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(src)
+        except Exception as e:
+            messagebox.showerror("读不了这个文件", str(e))
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("挂一张换图：选页面 → 选图号 → 挑新图")
+        dlg.geometry("640x420")
+        bar = ttk.Frame(dlg, padding=8)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="页面：").pack(side="left")
+        pages = [ws.title for ws in wb.worksheets]
+        cur = ttk.Combobox(bar, values=pages, width=32)
+        cur.set(self.process_rows[self.proc_index].get("sheet") if
+                0 <= self.proc_index < len(self.process_rows) and
+                self.process_rows[self.proc_index].get("sheet") in pages else pages[0])
+        cur.pack(side="left", padx=4)
+
+        tree = ttk.Treeview(dlg, columns=("no", "pos", "size", "hint"),
+                            show="headings", height=12)
+        for cid, txt, w in (("no", "图号", 60), ("pos", "所在位置", 140),
+                            ("size", "显示尺寸", 120), ("hint", "旁边最近的步骤", 220)):
+            tree.heading(cid, text=txt)
+            tree.column(cid, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=4)
+
+        def load():
+            tree.delete(*tree.get_children())
+            ws = wb[cur.get()]
+            for d in cr.list_images(ws):
+                tree.insert("", "end", values=(f"#{d['index'] + 1}", d["pos"],
+                                               f"{d['w']}×{d['h']}", d["hint"]))
+        ttk.Button(bar, text="列出这一页的配图", command=load).pack(side="left", padx=4)
+        load()
+
+        def attach():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("提示", "先在表里选中一张图", parent=dlg)
+                return
+            no = int(tree.item(sel[0])["values"][0].lstrip("#")) - 1
+            path = filedialog.askopenfilename(title="挑新图", parent=dlg,
+                                              filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp")])
+            if not path:
+                return
+            self.cr_pending.append((cur.get(), no, path))
+            self._cr_refresh_pending()
+            messagebox.showinfo("已挂上", f"{cur.get()} 图#{no + 1} → {Path(path).name}\n"
+                                         f"\n执行（改文字那步一起）时才真正写入新文件。", parent=dlg)
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg, padding=8)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="挑新图并挂上", command=attach).pack(side="left")
+        ttk.Button(btns, text="清空已挂的换图",
+                   command=lambda: (self.cr_pending.clear(), self._cr_refresh_pending())).pack(
+            side="left", padx=8)
+        ttk.Button(btns, text="关闭", command=dlg.destroy).pack(side="right")
 
     def run_demo(self):
         try:

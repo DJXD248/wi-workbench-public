@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """无界面回归检查（云端任务也能跑：不需要 Excel/WPS/GUI，只装 requirements.txt）。
 
-它把三条硬规则变成机器判据：
+它把四条规矩变成机器判据：
   1) 正文不许动 —— 规范化只能换版头，第 5 行往下的文字必须逐字不变、图片一张不丢；
   2) 步骤不限 4 步 —— 6 步/8 步的工序要在一页里排下，标题行落在预期坐标，页脚跟着下移；
-  3) 一道工序 = 一个工作表 —— 不许拆成多个 sheet。
+  3) 一道工序 = 一个工作表 —— 不许拆成多个 sheet；
+  4) 一句话需求 —— 只改该改的格，未命中的格逐字不变；改过的页必须自己写上变更栏＋日期，
+     清单页必须登记"哪一页改了什么"；换图不许增减张数、不许挪位置。
 
 用法：python tests/verify.py        （从任意目录跑都行）
 退出码：0 = 全部通过；非 0 = 有判据失败（打印 FAIL 行）。
@@ -259,6 +261,145 @@ def header_replaced(out_path: str, src_path: str, src: dict) -> bool:
 
 # ---------------------------------------------------------------- 配置库
 
+# ---------------------------------------------------------------- 一句话需求路径
+
+def _block_cells(ws, block) -> set:
+    """变更栏会动到的格子（内容列＋日期列，逐个槽位，合并区取左上角）"""
+    col, dcol, slots = block
+    out = set()
+    for r in slots:
+        for c in (col, dcol):
+            for m in ws.merged_cells.ranges:
+                if m.min_row <= r <= m.max_row and m.min_col <= c <= m.max_col:
+                    r, c = m.min_row, m.min_col
+                    break
+            out.add((r, c))
+    return out
+
+
+def _grid(ws) -> dict:
+    g = {}
+    for row in ws.iter_rows():
+        for c in row:
+            if c.value not in (None, ""):
+                g[(c.row, c.column)] = str(c.value)
+    return g
+
+
+def verify_change_request(tmp: str):
+    import hashlib
+    from datetime import date
+    import change_request as cr
+
+    ops = cr.parse_request("把所有的F435氩弧焊机改成F348TIG焊机，删除所有氩气充气时间")
+    check("[一句话] 大白话能拆成一改一删两个动作",
+          len(ops) == 2 and ops[0].kind == "replace" and ops[1].kind == "delete"
+          and ops[0].source == "F435氩弧焊机" and ops[0].target == "F348TIG焊机"
+          and ops[1].source == "氩气充气时间", str([(o.kind, o.source, o.target) for o in ops]))
+    check("[一句话] 与修改无关的话不会硬编出动作",
+          cr.parse_request("今天天气不错，我们再聊聊") == [])
+
+    # 造一份带"型号与名称分在两格"的生成版：F435 在编号格、氩弧焊机在名称格
+    wi, declared = build_wi(2, 1, tmp, "CR")
+    p = wi.processes[0]
+    p.add_material("F435", "氩弧焊机")
+    p.steps[0].content = "调整气压，确认氩气充气时间 5 秒，开始点焊"
+    src = os.path.join(tmp, "cr_src.xlsx")
+    ExcelGenerator(TEMPLATE).generate(wi, src)
+    before = hashlib.md5(open(src, "rb").read()).hexdigest()
+
+    new_img = os.path.join(tmp, "cr_new.png")
+    PILImage.new("RGB", (30, 20), (200, 30, 30)).save(new_img)
+    src_wb = openpyxl.load_workbook(src)
+    proc = next(ws for ws in src_wb.worksheets if step_labels(ws))
+    proc_name, img_index = proc.title, 0
+    src_anchor = getattr(proc._images[0].anchor, "_from", None)
+    src_grid = {ws.title: _grid(ws) for ws in src_wb.worksheets}
+    src_blocks = {ws.title: cr.find_change_block(ws) for ws in src_wb.worksheets}
+    src_maxrow = {ws.title: ws.max_row for ws in src_wb.worksheets}
+    src_wb.close()
+
+    rep = cr.run(src, "把所有的F435氩弧焊机改成F348TIG焊机，删除所有氩气充气时间",
+                 out_dir=os.path.join(tmp, "cr_out"),
+                 image_ops=[(proc_name, img_index, new_img)])
+
+    check("[一句话] 确实命中并写出了文件（0 命中必须判失败，不许空跑蒙绿）",
+          bool(rep.edits) and bool(rep.output) and os.path.exists(rep.output),
+          f"命中 {len(rep.edits)} 页；warnings={rep.warnings}")
+    check("[一句话] 原文件一个字节都没动",
+          hashlib.md5(open(src, "rb").read()).hexdigest() == before)
+    if not rep.edits or not os.path.exists(rep.output):
+        return
+
+    out_wb = openpyxl.load_workbook(rep.output)
+    try:
+        # 1) 命中的格按预期改写
+        g = {ws.title: _grid(ws) for ws in out_wb.worksheets}
+        hit_cells = [k for k, v in g[proc_name].items() if v in ("F348TIG", "焊机")]
+        check("[一句话] 型号与名称分在两格时也换到了（F435→F348TIG、氩弧焊机→焊机）",
+              any(v == "F348TIG" for v in g[proc_name].values())
+              and any(v == "焊机" for v in g[proc_name].values()) and len(hit_cells) == 2,
+              str(hit_cells))
+        step_txt = [v for v in g[proc_name].values() if "调整气压" in v]
+        check("[一句话] 删除只摘掉含关键词的那一条，前后文留着",
+              len(step_txt) == 1 and "氩气充气时间" not in step_txt[0]
+              and "调整气压" in step_txt[0] and "开始点焊" in step_txt[0], repr(step_txt))
+
+        # 2) 没命中的格子必须逐字不变（改动只允许是：命中格 / 变更栏 / 表下方追加）
+        words = ("F435", "氩弧焊机", "氩气充气时间")
+        bad = []
+        for title, old in src_grid.items():
+            new = g[title]
+            allowed = _block_cells(out_wb[title], src_blocks[title]) if src_blocks[title] else set()
+            for k, v in old.items():
+                nv = new.get(k, "")
+                if nv != v and not (k in allowed or any(w in v for w in words)):
+                    bad.append(f"{title}!{k}")
+            for k, v in new.items():
+                if k not in old and v and k not in allowed and k[0] <= src_maxrow[title]:
+                    bad.append(f"{title} 凭空多出{k}")
+        check("[一句话] 未命中的格子逐字不变，也没多出别的格子", not bad, "; ".join(bad[:5]))
+
+        # 3) 规矩①：改过的页面，自己那一页的变更栏写了内容＋日期
+        today = date.today().isoformat()
+        miss = []
+        for ed in rep.edits:
+            ws = out_wb[ed.sheet]
+            block = cr.find_change_block(ws)
+            if not block:
+                miss.append(f"{ed.sheet} 找不到变更栏")
+                continue
+            col, dcol, slots = block
+            ok = any(cr._get(ws, r, col).strip() and cr._get(ws, r, dcol).strip() == today
+                     for r in slots)
+            if not ok:
+                miss.append(f"{ed.sheet} 变更栏没写今天({today})的记录")
+        check(f"[一句话] {len(rep.edits)} 个改动页各自写了变更栏＋日期", not miss, "; ".join(miss[:4]))
+
+        # 4) 规矩②：清单页登记"哪一页改了什么"
+        cover = next((ws for ws in out_wb.worksheets if "清单" in ws.title), None)
+        texts = [v for ws in ([cover] if cover else []) for row in ws.iter_rows() for v in
+                 (str(c.value) for c in row if c.value is not None)]
+        joined = "\n".join(texts)
+        not_in_cover = [ed.sheet for ed in rep.edits if ed.sheet != cover.title
+                        and cr._page_no(out_wb[ed.sheet]) not in joined]
+        check(f"[一句话] 清单页列出了每个改动页（共 {len(rep.edits)} 页）",
+              cover is not None and not not_in_cover,
+              "清单里找不到工序号：" + ";".join(not_in_cover[:4]) if not_in_cover else "")
+
+        # 5) 换图：张数一张不增减，位置原样
+        ws = out_wb[proc_name]
+        check("[一句话] 换图后配图张数不变（生成时嵌入 %d 张）" % declared,
+              len(ws._images) == declared, f"输出 {len(ws._images)} 张")
+        fa = getattr(ws._images[0].anchor, "_from", None)
+        check("[一句话] 换上去的图还在原来的位置（锚点没挪）",
+              fa is not None and src_anchor is not None
+              and (fa.row, fa.col) == (src_anchor.row, src_anchor.col),
+              f"{(src_anchor.row, src_anchor.col)} → {(fa.row, fa.col) if fa else None}")
+    finally:
+        out_wb.close()
+
+
 def verify_configs(tmp: str):
     cfg_dir = os.path.join(BASE, "configs")
     yamls = [os.path.join(r, f) for r, _, fs in os.walk(cfg_dir)
@@ -301,6 +442,7 @@ def main() -> int:
         verify_generated_layout(tmp, 6, 2)
         verify_generated_layout(tmp, 8, 1)
         verify_normalize(tmp)
+        verify_change_request(tmp)
         verify_configs(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
