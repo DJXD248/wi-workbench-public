@@ -6,7 +6,9 @@
   2) 步骤不限 4 步 —— 6 步/8 步的工序要在一页里排下，标题行落在预期坐标，页脚跟着下移；
   3) 一道工序 = 一个工作表 —— 不许拆成多个 sheet；
   4) 一句话需求 —— 只改该改的格，未命中的格逐字不变；改过的页必须自己写上变更栏＋日期，
-     清单页必须登记"哪一页改了什么"；换图不许增减张数、不许挪位置。
+     清单页必须登记"哪一页改了什么"；换图不许增减张数、不许挪位置；
+     没有变更栏或栏已写满时走表尾追加登记，重复追加不重建表头（2026-10-22 补）；
+     生成侧另测 10 步仍不拆页（证明"步骤不限"没有隐性上限）。
 
 用法：python tests/verify.py        （从任意目录跑都行）
 退出码：0 = 全部通过；非 0 = 有判据失败（打印 FAIL 行）。
@@ -400,6 +402,131 @@ def verify_change_request(tmp: str):
         out_wb.close()
 
 
+def verify_change_request_fallback(tmp: str):
+    """变更登记的兜底路径：没有变更栏、或栏位已写满时，必须在本表下方追加登记，
+    且对已存在的追加表接着往下写、不重复建表头。
+    真实老文件大多没有变更栏（交接文档 §4：栏位坐标随文件而变），
+    而这条路以前一条断言都没有——补上。"""
+    from datetime import date
+    import change_request as cr
+    today = date.today().isoformat()
+    HEAD = "变更登记Change record（工具追加）"
+
+    def _heads(ws):
+        return [c for row in ws.iter_rows(min_col=1, max_col=1) for c in row
+                if isinstance(c.value, str) and c.value.startswith(HEAD)]
+
+    def _has_today(ws):
+        return any(isinstance(c.value, str) and c.value.strip() == today
+                   for row in ws.iter_rows() for c in row)
+
+    # --- 形状一：整份文件没有任何变更栏（老文件常态）---
+    wb = openpyxl.Workbook()
+    cover = wb.active
+    cover.title = "清单"
+    cover["A1"] = "工序号"
+    cover["B1"] = "工位名称"
+    cover["A2"] = "P-1"
+    cover["B2"] = "测试工位 F435"
+    proc = wb.create_sheet("工序P-1")
+    proc["A1"] = "工序号"
+    proc["B1"] = "P-1"
+    proc["A3"] = "把 F435 装到台上，确认氩气充气时间 5 秒"
+    src = os.path.join(tmp, "cr_fb_nobar.xlsx")
+    wb.save(src)
+    wb.close()
+
+    rep = cr.run(src, "把所有的F435改成F348TIG，删除所有氩气充气时间",
+                 out_dir=os.path.join(tmp, "cr_fb1_out"))
+    check("[一句话] 兜底：没有变更栏的老文件也能改并写出文件",
+          bool(rep.edits) and bool(rep.output) and os.path.exists(rep.output),
+          f"命中 {len(rep.edits)} 页；warnings={rep.warnings}")
+    if os.path.exists(rep.output):
+        wb2 = openpyxl.load_workbook(rep.output)
+        try:
+            bad = []
+            for title in ("清单", "工序P-1"):
+                ws = wb2[title]
+                if len(_heads(ws)) != 1 or not _has_today(ws):
+                    bad.append(f"{title} 表头{len(_heads(ws))}个/"
+                               f"日期{'有' if _has_today(ws) else '缺'}")
+            check("[一句话] 兜底：无栏文件每张改过的表都追加了登记＋今天日期",
+                  not bad, "; ".join(bad))
+            g = {ws.title: _grid(ws) for ws in wb2.worksheets}
+            # 只查正文格 A3：追加的登记文本本身就含"F435"字样（那是在记录这次改动），
+            # 判"换没换干净"要看正文，不能把登记区搅进来
+            a3 = g["工序P-1"].get((3, 1), "")
+            check("[一句话] 兜底：追加登记不影响正文替换本身（该换的换到、该删的删掉）",
+                  "F435" not in a3 and "F348TIG" in a3
+                  and "氩气充气时间" not in a3, repr(a3))
+        finally:
+            wb2.close()
+
+    # --- 形状二：有变更栏但槽位已写满 → 也走追加，不硬塞、不动旧记录 ---
+    wb = openpyxl.Workbook()
+    cover = wb.active
+    cover.title = "清单"
+    cover["A1"] = "工序号"
+    cover["B1"] = "工位名称"
+    cover["A2"] = "P-2"
+    cover["B2"] = "测试工位 F435"
+    proc = wb.create_sheet("工序P-2")
+    proc["A1"] = "工序号"
+    proc["B1"] = "P-2"
+    proc["A3"] = "把 F435 装到台上"
+    proc["A5"] = "内容变更"                                  # 标签独占一行（形状 A）
+    proc["A6"] = "内容"
+    proc["B6"] = "日期"
+    proc["A7"] = "更早的记录"
+    proc["B7"] = "2020-01-01"                                # 槽位预填＝写满
+    src2 = os.path.join(tmp, "cr_fb_full.xlsx")
+    wb.save(src2)
+    wb.close()
+
+    rep2 = cr.run(src2, "把所有的F435改成F348TIG",
+                  out_dir=os.path.join(tmp, "cr_fb2_out"))
+    if rep2.output and os.path.exists(rep2.output):
+        wb3 = openpyxl.load_workbook(rep2.output)
+        try:
+            ws = wb3["工序P-2"]
+            old_slot = (cr._get(ws, 7, 1), cr._get(ws, 7, 2))
+            check("[一句话] 兜底：变更栏写满时改走表尾追加，且旧记录一个字节没动",
+                  len(_heads(ws)) == 1 and _has_today(ws)
+                  and old_slot == ("更早的记录", "2020-01-01"),
+                  f"表头{len(_heads(ws))}个；第7行仍为{old_slot}")
+        finally:
+            wb3.close()
+    else:
+        check("[一句话] 兜底：变更栏写满时改走表尾追加", False,
+              f"warnings={rep2.warnings}")
+
+    # --- 回归：只读访问不许撑大表格边界（2026-10-22 栽过：_page_no 的只读访问
+    # 会创建空单元格把 max_row 撑大，害得表尾空行被误判成变更栏空槽、登记写飞）---
+    wb4 = openpyxl.load_workbook(src2)
+    try:
+        ws4 = wb4["工序P-2"]
+        before = cr.find_change_block(ws4)
+        cr._page_no(ws4)                     # 触发过 bug 的那个只读函数
+        after = cr.find_change_block(ws4)
+        check("[一句话] 回归：只读访问不撑大表格边界，变更栏槽位不漂移",
+              before == after and before is not None,
+              f"{before} → {after}")
+    finally:
+        wb4.close()
+
+    # --- 单元级：对已存在的追加表接着写，不重复建表头 ---
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "工序P-3"
+    cr._append_register(ws, ["第一次登记"], "2026-01-01", "「工序P-3」页")
+    cr._append_register(ws, ["第二次登记"], "2026-01-02", "「工序P-3」页")
+    hs = _heads(ws)
+    all_text = " ".join(str(c.value) for row in ws.iter_rows() for c in row if c.value)
+    check("[一句话] 兜底：同一张表第二遍追加不重建表头，两条登记都在",
+          len(hs) == 1 and "第一次登记" in all_text and "第二次登记" in all_text,
+          f"表头{len(hs)}个")
+
+
 def verify_configs(tmp: str):
     cfg_dir = os.path.join(BASE, "configs")
     yamls = [os.path.join(r, f) for r, _, fs in os.walk(cfg_dir)
@@ -441,8 +568,10 @@ def main() -> int:
         verify_generated_layout(tmp, 4, 1)
         verify_generated_layout(tmp, 6, 2)
         verify_generated_layout(tmp, 8, 1)
+        verify_generated_layout(tmp, 10, 1)      # 超过 8 步：证明"步骤不限"没有隐性上限
         verify_normalize(tmp)
         verify_change_request(tmp)
+        verify_change_request_fallback(tmp)      # 登记兜底路径：无栏/栏满/重复追加
         verify_configs(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

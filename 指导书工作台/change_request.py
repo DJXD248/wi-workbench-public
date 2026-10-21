@@ -11,9 +11,9 @@
 """
 from __future__ import annotations
 
+import io
 import os
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -202,12 +202,15 @@ _ANY_LABEL = re.compile(r"工序号|Working procedure|工位名称|Testing part|
 def _page_no(ws) -> str:
     """给这一页一个清单认得出来的名字：优先工序号（ZT-1 / DEMO-1），其次页码。
     清单页自己也有"工序号"表头，那里读到的是表头文字，不能当页名用。"""
-    for row in ws.iter_rows(min_row=1, max_row=8):
-        for c in row:
-            if isinstance(c.value, str) and _PROC_LABEL.match(c.value.strip()):
-                v = _get(ws, c.row, c.column + 2)
-                if v and not _ANY_LABEL.search(v):
-                    return v
+    # 只读遍历已有单元格：绝不许 iter_rows 越过真实边界（2026-10-22 栽过——
+    # max_row=8 会把表尾空行注册成单元格、撑大 max_row，害 find_change_block
+    # 把表格下方的空行误判成变更栏空槽，登记就写到版面外去了）。
+    for r, c in sorted(k for k in ws._cells if k[0] <= 8):
+        v = ws._cells[(r, c)].value
+        if isinstance(v, str) and _PROC_LABEL.match(v.strip()):
+            nxt = _get(ws, r, c + 2)
+            if nxt and not _ANY_LABEL.search(nxt):
+                return nxt
     for coord in ((4, 11), (2, 12)):
         v = _get(ws, coord[0], coord[1])
         if v and not _ANY_LABEL.search(v):
@@ -246,9 +249,8 @@ def find_change_block(ws):
         head_row = col = None
         for r in range(label.row, label.row + 4):
             for c in range(1, ws.max_column + 1):
-                v = ws.cell(r, c).value
-                if isinstance(v, str) and _LABEL_CONTENT.match(v.strip()) \
-                        and not _LABEL_CHANGE.search(v):
+                v = _peek(ws, r, c)
+                if v and _LABEL_CONTENT.match(v) and not _LABEL_CHANGE.search(v):
                     head_row, col = r, _merge_span(ws, ws.cell(r, c))[0]
                     break
             if head_row:
@@ -280,8 +282,8 @@ def _next_header_in_row(ws, row) -> bool:
     我们自己写的登记文字里也带"工序号"三个字，长段落不能当表头（否则下一轮跑
     这文件时，槽位会被自己写的内容截掉）。"""
     for c in range(1, 3):
-        v = ws.cell(row, c).value
-        if isinstance(v, str) and len(v) <= 24 and _NEXT_HEADER.search(v):
+        v = _peek(ws, row, c)
+        if v and len(v) <= 24 and _NEXT_HEADER.search(v):
             return True
     return False
 
@@ -300,12 +302,10 @@ def _merge_span(ws, cell) -> tuple[int, int]:
 def _date_col_in_row(ws, row, content_first: int, content_last: int):
     """日期标签可能挨在内容栏的左边也可能在右边；先左后右找"""
     for c in range(content_first - 1, 0, -1):
-        v = ws.cell(row, c).value
-        if isinstance(v, str) and _LABEL_DATE.match(v.strip()):
+        if _LABEL_DATE.match(_peek(ws, row, c)):
             return c
     for c in range(content_last + 1, min(content_last + 4, ws.max_column + 1)):
-        v = ws.cell(row, c).value
-        if isinstance(v, str) and _LABEL_DATE.match(v.strip()):
+        if _LABEL_DATE.match(_peek(ws, row, c)):
             return c
     return None
 
@@ -319,13 +319,21 @@ def _put(ws, row: int, col: int, value) -> None:
     ws.cell(row, col).value = value
 
 
-def _get(ws, row: int, col: int) -> str:
+def _peek(ws, row: int, col: int) -> str:
+    """只读取值，**绝不创建单元格**（openpyxl 的 ws.cell(r,c) 一读就创建，
+    会把 max_row 撑大，害 find_change_block 把表外的空行误判成变更栏槽位，
+    在真实文件里就是把登记插进别人的内容区）。合并区取左上角。"""
     for m in ws.merged_cells.ranges:
         if m.min_row <= row <= m.max_row and m.min_col <= col <= m.max_col:
             row, col = m.min_row, m.min_col
             break
-    v = ws.cell(row, col).value
+    c = ws._cells.get((row, col))
+    v = c.value if c is not None else None
     return "" if v is None else str(v).strip()
+
+
+def _get(ws, row: int, col: int) -> str:
+    return _peek(ws, row, col)
 
 
 def write_block_entry(ws, block, content: str, today: str) -> str:
@@ -366,7 +374,7 @@ def _append_register(ws, entries: list[str], today: str, title: str) -> str:
         ws.cell(r + 1, 1).value = "日期Date"
         ws.cell(r + 1, 2).value = "内容变更Change the content"
         r += 2
-    while ws.cell(r, 1).value is not None or ws.cell(r, 2).value is not None:
+    while _peek(ws, r, 1) or _peek(ws, r, 2):
         r += 1
     for content in entries:
         ws.cell(r, 1).value = today
@@ -481,14 +489,19 @@ def replace_image(ws, image_index: int, new_path: str) -> str:
     old = imgs[image_index]
     frm = getattr(old.anchor, "_from", None)
     from openpyxl.drawing.image import Image as XLImage
-    tmp = os.path.join(os.environ.get("TEMP", "."),
-                       f"_wi_newimg_{os.getpid()}_{id(old)}.png")
+    # 图片读进内存再交给 openpyxl，不往磁盘写临时文件：
+    # 老写法拼 os.environ["TEMP"]，没有这个变量的机器（含 Linux）会往当前目录
+    # 掉 _wi_newimg_*.png，既脏目录又没人清理。与 excel_generator._embed_step_images
+    # 的 BytesIO 做法保持一致。
+    buf = io.BytesIO()
     if new_path.lower().endswith(".png"):
-        shutil.copyfile(new_path, tmp)
+        with open(new_path, "rb") as f:
+            buf.write(f.read())
     else:
         from PIL import Image as PILImage
-        PILImage.open(new_path).convert("RGB").save(tmp, "PNG")
-    new = XLImage(tmp)
+        PILImage.open(new_path).convert("RGB").save(buf, "PNG")
+    buf.seek(0)
+    new = XLImage(buf)
     new.width, new.height = old.width, old.height
     new.anchor = old.anchor
     imgs[image_index] = new
