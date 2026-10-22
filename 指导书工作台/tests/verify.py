@@ -529,6 +529,20 @@ def verify_change_request_fallback(tmp: str):
 
 def verify_configs(tmp: str):
     cfg_dir = os.path.join(BASE, "configs")
+    # 防复发：顶层系列目录名去掉空格后必须唯一。2026-10-22 删过一对
+    # "AI 演示系列" / "AI演示系列" 重复目录——看板统计按系列名汇总，
+    # 近似重复会把一个系列算成两个，GUI 里两个同名文件也容易点错。
+    seen, dup = {}, []
+    for d in sorted(os.listdir(cfg_dir)):
+        if not os.path.isdir(os.path.join(cfg_dir, d)):
+            continue
+        key = d.replace(" ", "")
+        if key in seen:
+            dup.append(f"{seen[key]} 与 {d}")
+        else:
+            seen[key] = d
+    check("[配置库] 系列目录名无近似重复（去空格后唯一）", not dup, "; ".join(dup))
+
     yamls = [os.path.join(r, f) for r, _, fs in os.walk(cfg_dir)
              for f in fs if f.endswith(".yaml") and f != "blank_template.yaml"]
     ok = skipped = 0
