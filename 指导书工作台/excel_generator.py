@@ -266,6 +266,53 @@ class ExcelGenerator:
                 cell.fill = PatternFill()
         return footer_row
 
+    @staticmethod
+    def _split_grouped_cols(ws, max_col: int = 8):
+        """把第 1~max_col 列范围内「一条定义覆盖多列」的列宽拆成逐列独立定义。
+
+        模板《新格式》把 G、H 两列并成一条 min=7 max=8 的 col 定义（都=15）。
+        openpyxl 读 column_dimensions['H'] 拿到的却是默认值 13，不是真实的 15；
+        更糟的是只要读过 H，保存时就会写出两条互相冲突的第 8 列定义（15 和 13），
+        Excel/WPS 取哪一条不确定——整列可能变窄、版面错乱。这里主动拆开，
+        读写一致，从根上消除这个偏差。
+        """
+        from openpyxl.utils import get_column_letter as _gl
+        for key, cd in list(ws.column_dimensions.items()):
+            if cd.min is None or cd.max is None or cd.max <= cd.min:
+                continue
+            if cd.min > max_col:
+                continue
+            w = cd.width
+            for c in range(cd.min, min(cd.max, max_col) + 1):
+                tgt = ws.column_dimensions[_gl(c)]
+                tgt.width = w          # customWidth 由 width 自动派生，无需手动设
+                tgt.min = c
+                tgt.max = c
+                try:
+                    tgt.style = cd.style
+                except Exception:
+                    pass
+            # 原分组条目：超出 max_col 的剩余列保留覆盖，否则删除整条
+            if cd.max > max_col:
+                cd.min = max_col + 1
+            else:
+                del ws.column_dimensions[key]
+
+    @staticmethod
+    def _col_at(ws, cols, px: float):
+        """px（相对块左缘的像素数）落在块内哪一列、列内偏移多少。
+
+        返回 (列字母, 列内偏移px)，偏移恒在 [0, 该列宽) 内——图片锚点用，
+        保证 colOff 合法、不依赖跨列偏移这种各渲染器行为不一的手法。
+        """
+        acc = 0.0
+        for c in cols:
+            w = (ws.column_dimensions[c].width or 8.43) * 7.5
+            if px < acc + w:
+                return c, px - acc
+            acc += w
+        return cols[-1], 0.0
+
     def _fill_process_sheet(self, ws, wi: WorkInstruction,
                             p: Process, warnings: List[str]):
         from openpyxl.worksheet.properties import PageSetupProperties
@@ -298,9 +345,15 @@ class ExcelGenerator:
         n_blocks = max(len(steps), 1)
         n_bands = (n_blocks + 1) // 2
         footer_row = self._ensure_step_bands(ws, n_bands)
+        # 根治 H 列宽读取偏差：模板把 G/H 并成一条 col 定义，openpyxl 读 H 会拿到
+        # 默认值 13 而非真实 15，且保存时写出两条冲突定义——先拆成逐列独立定义
+        self._split_grouped_cols(ws)
         # 整张工序页（含扩展出来的多段步骤）缩放到一页：一道工序不拆成多页
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 1
+        if n_bands > 4:
+            warnings.append(f"工序 {p.process_no} 有 {len(steps)} 步（{n_bands} 段），"
+                            f"打印时整页缩放会很小，建议拆分工序或精简配图")
 
         bodies = ["\n".join(x for x in (s.content_en, s.content) if x)
                   for s in steps]
@@ -482,19 +535,25 @@ class ExcelGenerator:
                 continue
             col0, r_lab, cols = self._step_block(i)
             ncols = len(cols)
-            # 图片区可用高度约 12 行；多于 ncols 张时纵向排多行，缩小每张高度
+            # 图片区可用高度按真实行高逐行累加（pt→px），上下共留 8px 呼吸；
+            # 一步多于 ncols 张图时纵向排多行，每排高度均分
             n_total = len(paths)
             n_rows = (n_total + ncols - 1) // ncols
-            area_px = 187
-            max_h = max(area_px // n_rows, 40)
+            img_r0, img_r1 = r_lab + 1, r_lab + PROC_IMG_ROWS   # 1-indexed 闭区间
+            avail_px = sum(ws.row_dimensions[r].height or 17.65
+                           for r in range(img_r0, img_r1 + 1)) * 96 / 72 - 8
+            slot_h = max(avail_px / n_rows, 30)      # 每排槽位高(px)
+            max_h = max(int(slot_h) - 2, 28)
             rows_per_img = max(PROC_IMG_ROWS // n_rows, 1)
-            # 内容区起始行
-            if r_lab == 5:
-                base_row = 10
-            elif r_lab == 22:
-                base_row = 23
-            else:
-                base_row = r_lab + 5
+            # 方案甲（等宽整齐）的落地：块内图片按排均分槽宽——一步 1 张图时
+            # 图可占到整块宽、2 张时各占半块，3 张以上按列均分；同排图一律
+            # 等宽不溢出、互不重叠（H 列宽偏差已由 _split_grouped_cols 根治）
+            block_w = sum((ws.column_dimensions[c].width or 8.43) * 7.5 for c in cols)
+            per_row = min(n_total, ncols)            # 每排几张
+            slot_w = max(block_w / per_row, 40)
+            # 图从图区顶行开始：r_lab 是 1-indexed 标题行，0-indexed 图区顶 = r_lab
+            # （曾按 r_lab==5→10、else r_lab+5 起锚，平白多空 5 行；band1 还偏 1 行）
+            base_row = r_lab
 
             for j, q in enumerate(paths):
                 fp = Path(q)
@@ -507,12 +566,8 @@ class ExcelGenerator:
                     from PIL import Image as PILImage
                     pil_img = PILImage.open(fp)
 
-                    col = cols[j % ncols]
-                    col_width_chars = ws.column_dimensions[col].width or 8.43
-                    target_px_w = int(col_width_chars * 7.5)
-
                     if pil_img.size[0] > 0 and pil_img.size[1] > 0:
-                        ratio_w = target_px_w / pil_img.size[0]
+                        ratio_w = (slot_w - 4) / pil_img.size[0]   # 槽内留 4px 间距
                         ratio_h = max_h / pil_img.size[1]
                         ratio = min(ratio_w, ratio_h)
                         new_w = max(int(round(pil_img.size[0] * ratio)), 30)
@@ -525,7 +580,7 @@ class ExcelGenerator:
                         new_h = max_h
                     pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
 
-                    PX_TO_EMU = 914400 // 96
+                    PX_TO_EMU = 914400 // 96   # 9525
 
                     buf = io.BytesIO()
                     if pil_img.mode == 'RGBA':
@@ -539,13 +594,21 @@ class ExcelGenerator:
                     im._user_width = new_w * PX_TO_EMU
                     im._user_height = new_h * PX_TO_EMU
 
-                    anchor_col = ord(col) - ord("A")
-                    anchor_row = base_row + (j // ncols) * rows_per_img
+                    # 图左缘 = 槽内水平居中；锚点列 = 图左缘落在的那一列，
+                    # colOff = 图左缘相对该列左缘的偏移（恒在 [0, 列宽) 内）。
+                    # colOff/rowOff 单位是 EMU，1px = 9525 EMU。曾经误写 2 * 914400
+                    # （=192px），每张图被向右下各推 2 英寸——图砸文字区、盖住步骤
+                    # 描述，这是「位置不正确 / 吞字」的最大元凶。
+                    slot_start = (j % per_row) * slot_w
+                    img_left = slot_start + max(0.0, (slot_w - 4 - new_w) / 2)
+                    anchor_col_letter, col_off_px = self._col_at(ws, cols, img_left)
+                    anchor_col = ord(anchor_col_letter) - ord("A")
+                    anchor_row = base_row + (j // per_row) * rows_per_img
                     marker = AnchorMarker(
                         col=anchor_col,
                         row=anchor_row,
-                        colOff=2 * 914400,   # 2px 左边距
-                        rowOff=2 * 914400)   # 2px 上边距
+                        colOff=pixels_to_EMU(col_off_px),
+                        rowOff=pixels_to_EMU(2))     # 顶对齐：图贴着标题行下方
 
                     im.anchor = OneCellAnchor(_from=marker)
                     im.anchor.ext = XDRPositiveSize2D(
@@ -644,8 +707,10 @@ class ExcelGenerator:
                             from PIL import Image
                             img = Image.open(io.BytesIO(media_files[media_path]))
                             w, h = img.size
-                            ext_elem.set('cx', str(w * 914400))
-                            ext_elem.set('cy', str(h * 914400))
+                            # 像素 → EMU：1px = 9525 EMU（914400/96）。
+                            # 曾经误写 w * 914400（把像素当英寸），一旦触发就把图放大 96 倍
+                            ext_elem.set('cx', str(w * 9525))
+                            ext_elem.set('cy', str(h * 9525))
                             changed_any = True
                         except Exception:
                             pass
@@ -670,8 +735,6 @@ class ExcelGenerator:
                     _os_mod.unlink(tmp_path)
         except Exception:
             pass
-
-        shutil.move(tmp_path, output_path)
 
     # ---------- 辅助 ----------
     @staticmethod

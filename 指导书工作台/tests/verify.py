@@ -188,6 +188,151 @@ def verify_generated_layout(tmp: str, n_steps: int, imgs_per_step: int):
         wb.close()
 
 
+# ---------------------------------------------------------------- 版面几何（图片位置/尺寸）
+
+# 模板「新格式」真实列宽（XML 实测：G/H 由一条 min=7 max=8 的定义合并设置，都是 15）
+COL_W = {"A": 15, "B": 12.875, "C": 17.5, "D": 14.25,
+         "E": 16.5, "F": 13.875, "G": 15, "H": 15}
+EMU_PER_PX = 9525
+ROW_PX = 17.65 * 96 / 72          # 模板行高 17.65pt = 23.533px
+
+
+def verify_image_geometry(tmp: str):
+    """版面几何判据（2026-10-22 补，专防「吞字/位置不正确/大小不一」复发）：
+      1. 任何图片底部不许越过文字区顶线——压住步骤描述就是吞字；
+      2. 每块最顶上的图片必须贴着图区顶起排——不允许标签和图之间空一大截；
+      3. 列宽不许有分组/重复定义——H 列曾因 15/13 两条打架而版面错乱；
+      4. 同块同排图片必须等宽——方案甲；锚点 colOff 必须落在所在列内。
+    横图/竖图/一步8图两排三种构型各跑一遍。"""
+    def build(counts, size, tag: str) -> WorkInstruction:
+        """counts: 每一步各挂几张图。"""
+        pngs = []
+        for i in range(sum(counts)):
+            p = os.path.join(tmp, f"geo_{tag}_{i}.png")
+            PILImage.new("RGB", size, (80, 110, 160)).save(p)
+            pngs.append(p)
+        p = Process(process_no=f"{tag}-1", process_name=f"Test {tag}",
+                    process_name_cn=f"几何{tag}", work_hours=30, page_no=1)
+        k = 0
+        for i, cnt in enumerate(counts, 1):
+            p.add_step(i, f"第{i}步动作描述", f"Step {i} description")
+            for _ in range(cnt):
+                p.steps[-1].images.append(pngs[k])
+                k += 1
+        wi = WorkInstruction()
+        wi.header.file_no = f"GEO-{tag}"
+        wi.header.edition = "A"
+        wi.header.product_spec_cn = f"版面几何{tag}"
+        wi.header.made_by = wi.header.checked_by = wi.header.approved_by = "几何"
+        wi.add_process(p)
+        return wi
+
+    # 注意：工序页必须是 4 步——模板自带 4 个占位标题，2 步的页会被占位标题
+    # 干扰识别（历史行为），所以一步 8 图的两排场景用 4 步 + 首步 8 图来构造
+    for counts, size, tag in (([2, 2, 2, 2], (320, 240), "横图"),
+                              ([2, 2, 2, 2], (240, 320), "竖图"),
+                              ([8, 1, 1, 1], (320, 240), "两排")):
+        n_steps = len(counts)
+        total = sum(counts)
+        wi = build(counts, size, tag)
+        out = os.path.join(tmp, f"geo_{tag}.xlsx")
+        ExcelGenerator(TEMPLATE).generate(wi, out)
+        wb = openpyxl.load_workbook(out)
+        try:
+            ws = find_process_sheet(wb, n_steps)
+            if ws is None:
+                check(f"[版面] {tag}：找到工序页", False, "未找到")
+                continue
+
+            # 每张图：锚点行/列 + colOff/rowOff + 尺寸，全部换算成 px
+            imgs_info = []
+            for img in ws._images:
+                a = img.anchor
+                frm, ext = a._from, a.ext
+                row0, col0 = frm.row, frm.col
+                top = row0 * ROW_PX + (frm.rowOff or 0) / EMU_PER_PX
+                left = (sum(COL_W[chr(65 + k)] * 7.5 for k in range(col0))
+                        + (frm.colOff or 0) / EMU_PER_PX)
+                wpx, hpx = ext.cx / EMU_PER_PX, ext.cy / EMU_PER_PX
+                imgs_info.append((row0, col0, top, left, wpx, hpx))
+            check(f"[版面] {tag}：图片全部嵌入（{len(imgs_info)} 张）",
+                  len(imgs_info) == total,
+                  f"期望 {total} 实得 {len(imgs_info)}")
+            if len(imgs_info) != total:
+                continue
+
+            # 判据1：图片底部不许越过文字区顶线（吞字防线）
+            press = []
+            for (row0, col0, top, left, wpx, hpx) in imgs_info:
+                band = (row0 - FIRST_LABEL_ROW) // BAND if row0 >= FIRST_LABEL_ROW else 0
+                r_lab = FIRST_LABEL_ROW + band * BAND
+                txt_top = (r_lab + 12) * ROW_PX        # 文字区首行（1-indexed r_lab+13）的行首
+                if top + hpx > txt_top + 1:
+                    press.append(f"图@行{row0 + 1}底{top + hpx:.0f}px 越过文字线 {txt_top:.0f}px")
+            check(f"[版面] {tag}：没有图片压住步骤文字（吞字防线）", not press,
+                  "; ".join(press[:4]))
+
+            # 判据2：每块最顶上的图必须贴着图区顶（位置防线）
+            gap_bad = []
+            for band in range((max(r[0] for r in imgs_info) - FIRST_LABEL_ROW) // BAND + 1):
+                r_lab = FIRST_LABEL_ROW + band * BAND
+                img_top = r_lab * ROW_PX               # 图区首行（1-indexed r_lab+1）的行首
+                rows_in = [t for (r0, c, t, l, w, h) in imgs_info
+                           if r_lab <= r0 <= r_lab + 11]
+                if rows_in and min(rows_in) > img_top + 6:
+                    gap_bad.append(f"第{band + 1}段图顶空白 {min(rows_in) - img_top:.0f}px")
+            check(f"[版面] {tag}：图片贴着标题下方起排（不留大白条）", not gap_bad,
+                  "; ".join(gap_bad[:4]))
+
+            # 判据3：列宽无分组/重复定义（版面错乱防线）
+            cover = {}
+            for key, cd in ws.column_dimensions.items():
+                if cd.min is None or cd.max is None:
+                    continue
+                if cd.max < 1 or cd.min > 8:
+                    continue
+                for c in range(max(cd.min, 1), min(cd.max, 8) + 1):
+                    cover.setdefault(c, []).append((key, cd.width))
+            conflict = [f"第{c}列:{[w for _, w in lst]}"
+                        for c, lst in sorted(cover.items())
+                        if len({round(w, 3) for _, w in lst}) > 1]
+            check(f"[版面] {tag}：列宽无冲突定义（H 列不再 15/13 打架）", not conflict,
+                  "; ".join(conflict[:4]))
+
+            # 判据4：同块同排等宽（方案甲）+ 锚点 colOff 落在所在列内
+            groups = {}
+            for (row0, col0, top, left, wpx, hpx) in imgs_info:
+                groups.setdefault((row0, col0 // 4), []).append(wpx)
+            uneven = [f"排{k}:{[round(w) for w in v]}"
+                      for k, v in groups.items() if len(v) > 1 and max(v) - min(v) > 1]
+            check(f"[版面] {tag}：同排图片等宽（方案甲）", not uneven,
+                  "; ".join(uneven[:4]))
+            off_bad = []
+            for (row0, col0, top, left, wpx, hpx) in imgs_info:
+                col_letter = chr(65 + col0)
+                col_px = COL_W.get(col_letter, 8.43) * 7.5
+                if left - sum(COL_W[chr(65 + k)] * 7.5 for k in range(col0)) > col_px + 0.5:
+                    off_bad.append(f"图@{col_letter}{row0 + 1} colOff 越过列宽")
+            check(f"[版面] {tag}：锚点偏移合法（colOff 不越列宽）", not off_bad,
+                  "; ".join(off_bad[:4]))
+        finally:
+            wb.close()
+
+    # 判据5（源码级防回归）：_fix_image_dimensions 里像素→EMU 必须乘 9525。
+    # 这里误写过 914400（把像素当英寸），一旦 ext=0 的后处理路径被触发，
+    # 图片会放大 96 倍——虽然正常流程不走该路径，也必须钉死。
+    gen_src = Path(BASE, "excel_generator.py").read_text(encoding="utf-8")
+    m = re.search(r"def _fix_image_dimensions\(.*?(?=\n    def |\nclass |\Z)",
+                  gen_src, re.S)
+    body = m.group(0) if m else ""
+    code_only = "\n".join(l.split("#", 1)[0] for l in body.splitlines())  # 剥掉注释再查
+    bad_mul = re.findall(r"\*\s*914400", code_only)
+    detail = (f"函数体仍有 {len(bad_mul)} 处 * 914400 乘法" if bad_mul
+              else ("函数体缺失" if not body else "像素→EMU = px×9525"))
+    check("[版面] 后处理像素→EMU 换算正确（9525，不再放大 96 倍）",
+          bool(body) and not bad_mul and "* 9525" in code_only, detail)
+
+
 # ---------------------------------------------------------------- 规范化路径
 
 def verify_normalize(tmp: str):
@@ -703,6 +848,7 @@ def main() -> int:
         verify_generated_layout(tmp, 6, 2)
         verify_generated_layout(tmp, 8, 1)
         verify_generated_layout(tmp, 10, 1)      # 超过 8 步：证明"步骤不限"没有隐性上限
+        verify_image_geometry(tmp)               # 版面几何：吞字/位置/等宽/列宽冲突防线
         verify_normalize(tmp)
         verify_change_request(tmp)
         verify_change_request_fallback(tmp)      # 登记兜底路径：无栏/栏满/重复追加
