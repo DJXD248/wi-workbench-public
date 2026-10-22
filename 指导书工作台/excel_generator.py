@@ -727,13 +727,62 @@ class Normalizer:
     _STEP_MARK = re.compile(r"^(第[一二三四五六七八九十\d]+步|Step\s*\d+)",
                             re.IGNORECASE)
 
+    # 版头特征字样：无步号页面往上吞"该步描述"时的停止线（用户 2026-10-22 口径）
+    _HEADER_HINTS = (
+        "公司", "Company", "Working Instruction", "作业指导书",
+        "文件编号", "File NO", "Edition", "版本",
+        "编制", "Made by", "审核", "Checked by", "批准", "Approved by",
+        "工序号", "Working procedure", "工位名称", "Testing part",
+        "页码", "Page number", "工时", "Working hour",
+        "附属文件", "Accessories",
+    )
+
+    @classmethod
+    def _image_anchor_rows(cls, ws) -> list:
+        """页面所有配图的锚点行（1-indexed，去重升序）。"""
+        rows = set()
+        for im in getattr(ws, "_images", []):
+            fr = getattr(im.anchor, "_from", None)
+            if fr is not None and getattr(fr, "row", None) is not None:
+                rows.add(fr.row + 1)
+        return sorted(rows)
+
+    @classmethod
+    def _first_step_row_by_image(cls, ws) -> Optional[int]:
+        """无步号工序页的正文起点（用户 2026-10-22 口径：按"图＋完整描述"为一步）。
+
+        从第一张配图的行往上，吞掉属于该步的描述文字；遇到空行或版头特征行就停。
+        没有配图返回 None——调用方按老行为告警、不换版头：
+        宁可不换版头，也绝不能把正文当版头删掉（硬规则①）。"""
+        img_rows = cls._image_anchor_rows(ws)
+        if not img_rows:
+            return None
+        r = img_rows[0]
+        while r > 2:
+            # 只看左侧 8 列（步骤内容区）：右侧的设备/工夹具、附属文件等表格
+            # 不算步骤描述，不许把正文起点往上拽——2026-10-22 验收抓到过：
+            # 右表标签正好压在第一条描述上一行，整行扫描会把版头区少算一行，
+            # 旧表格残在新版头下面。左 8 列与 _first_step_row 找步号同一个口径。
+            # 只读 _cells、不新建空单元格（openpyxl 一读就建的坑，
+            # 详见 change_request._peek 的注释）。
+            parts = []
+            for c in range(1, 9):
+                cell = ws._cells.get((r - 1, c))
+                if cell is not None and isinstance(cell.value, str) and cell.value.strip():
+                    parts.append(cell.value.strip())
+            line = " ".join(parts)
+            if not line or any(h in line for h in cls._HEADER_HINTS):
+                break
+            r -= 1
+        return r
+
     def _first_step_row(self, ws) -> Optional[int]:
         """返回第一个步骤标记所在行（1-indexed），只看左侧 8 列前 12 行；找不到返回 None。"""
         for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 12), max_col=8):
             for cell in row:
                 if isinstance(cell.value, str) and self._STEP_MARK.match(cell.value.strip()):
                     return cell.row
-        return None
+        return self._first_step_row_by_image(ws)
 
     def _replace_header(self, ws, ref, fsr, ref_hdr_rows, wi, p, copy):
         """把 ws 顶部版头条（第 1..fsr-1 行）替换为参考模板 ref 的版头样式，
@@ -768,7 +817,20 @@ class Normalizer:
                 dst = ws.cell(r, c)
                 dst.value = src.value
                 if src.has_style:
-                    dst._style = copy.copy(src._style)
+                    # 跨工作簿复制样式，绝不能直接搬 _style：StyleArray 里的
+                    # fontId/alignmentId 等下标是模板簿样式表的，目标簿里没有
+                    # 对应条目——保存时轻则张冠李戴套错样式，重则直接
+                    # IndexError 崩在 write_stylesheet（2026-10-22 无步号
+                    # 验收就这么崩过：目标簿是新建的薄样式表）。逐属性赋值
+                    # 才会把字体/填充/边框/对齐/保护/数字格式重新登记进
+                    # 目标簿的样式表。同簿内搬样式（如 _ensure_step_bands）
+                    # 仍可继续用 _style 直拷。
+                    dst.font = copy.copy(src.font)
+                    dst.fill = copy.copy(src.fill)
+                    dst.border = copy.copy(src.border)
+                    dst.alignment = copy.copy(src.alignment)
+                    dst.protection = copy.copy(src.protection)
+                    dst.number_format = src.number_format
             if ref.row_dimensions[r].height:
                 ws.row_dimensions[r].height = ref.row_dimensions[r].height
 
@@ -865,8 +927,17 @@ class Normalizer:
         wi.header.revision_history = self._parse_revisions(cover)
 
         img_dir = getattr(self, '_img_output_dir', None)
+        if isinstance(img_dir, str):
+            # 外部调用方可能给字符串路径；不转 Path 的话下面 img_dir / ...
+            # 会 TypeError，又被 except Exception 静默吞掉——配图悄无声息全丢
+            img_dir = Path(img_dir)
         if not img_dir and all_images:
             img_dir = Path(input_path).parent / "_norm_imgs" / Path(input_path).stem
+        if img_dir is not None:
+            # 目录不存在时 write_bytes 会抛异常，又被下面逐图的
+            # except Exception 静默吞掉——配图悄无声息全丢。
+            # 2026-10-22 无步号验收就是这么丢的，这里先建好目录。
+            img_dir.mkdir(parents=True, exist_ok=True)
 
         for ws in wb.worksheets:
             if ws is cover or "清单" in ws.title:
@@ -1095,8 +1166,14 @@ class Normalizer:
             "Type/code", "编         号Code", "名称Name", "数量Quantity",
         )
 
-        def _is_step_content(text):
-            """判断是否为步骤说明文本（不改动内容，只过滤明显非步骤的行）"""
+        def _is_step_content(text, loose=False):
+            """判断是否为步骤说明文本（不改动内容，只过滤明显非步骤的行）。
+
+            loose=True 只用于无步号页（用户 2026-10-22 口径"按图＋完整描述
+            为一步"的那种）：那里没有步号标签可混淆，图上方/下方的短句就是
+            完整描述，不能再按"15 字以内且无标点"当图片说明丢掉——
+            2026-10-22 验收抓到过 13 字无标点的描述被整句丢成空步骤。
+            有步号的页维持原口径（loose=False），行为一字不变。"""
             if not text or len(text) < 4:
                 return False
             t = text.strip()
@@ -1108,6 +1185,8 @@ class Normalizer:
                 return False
             if re.match(r'^[A-Z]{1,3}\d{4,}$', t):
                 return False
+            if loose:
+                return True
             # 跳过图片说明/标签（短文本、无标点、纯名词短语）
             if len(t) < 15 and '，' not in t and '。' not in t and '；' not in t and '、' not in t:
                 return False
@@ -1151,6 +1230,25 @@ class Normalizer:
             dedup.append((r, c, n))
         markers = sorted(dedup)  # 按行、列排序
 
+        virtual = False
+        if not markers:
+            virtual = True
+            # 无步号页面（用户 2026-10-22 口径"按图＋完整描述为一步"）：
+            # 拿配图锚点行当步骤领地边界——一步 = 一张（同行并排算一步）图 ＋ 它的完整描述。
+            # 第 1 步从正文起点（第一张图往上吞描述，见 _first_step_row_by_image）开始；
+            # 第 k 步（k≥2）从第 k-1 张图的下一行开始：每张图和它上方/下方的描述
+            # 归同一图所在的步——图归描述在它上方的那一步，图下面的描述归下一步
+            # （2026-10-22 验收抓到过 off-by-one：第 2 步从第 1 张图的行算起，
+            #  图 1 被并进第 2 步，描述和图没配上对）。
+            # 列统一取最左（0），让块文字覆盖整个内容区（右侧表格由 content_limit 挡着）。
+            img_rows = self._image_anchor_rows(ws)
+            if img_rows:
+                first_top = self._first_step_row_by_image(ws) or img_rows[0]
+                starts = [first_top] + [r + 1 for r in img_rows[:-1]]
+                for i, top in enumerate(starts):
+                    markers.append((top - 1, 0, i + 1))
+                markers.sort()
+
         # 行/列边界：标记所在的行、列构成网格
         marker_rows = sorted(set(r for r, c, n in markers))
         marker_cols = sorted(set(c for r, c, n in markers))
@@ -1159,10 +1257,21 @@ class Normalizer:
         content_limit = ws.max_column
         for r_idx, row in enumerate(all_rows[:12]):
             for c_idx, cv in enumerate(row):
+                # 只在第 5 列（E）及以右认右表标签：旧格式里右侧信息表
+                # （附属文件/劳保用具/设备工夹具）最早也从 E 列起（真实样本
+                # 如此），A-D 列是步骤描述的地盘。且标签格必须以关键词开头，
+                # 不能按子串匹配——2026-10-22 无步号验收抓到过：A 列描述
+                # "检查设备外观是否完好"含"设备"二字，被子串匹配误判成右表
+                # 起点，内容区右界被压成 0 列，步骤文字和配图全归不了位。
+                # 右界宁可探测不到（步骤文字多带几列右表内容），
+                # 也绝不能把内容区压垮。
+                if c_idx < 4:
+                    continue
                 if isinstance(cv, str) and any(
-                        lb in cv for lb in ("附属文件", "Accessories", "劳保用具",
-                                            "Protected", "设备", "物料", "Material",
-                                            "工位质量", "Machines", "Quality")):
+                        cv.strip().startswith(lb) for lb in (
+                        "附属文件", "Accessories", "劳保用具", "Protected",
+                        "设备", "物料", "Material", "工位质量", "Machines",
+                        "Quality")):
                     content_limit = min(content_limit, c_idx)
         # 内容区下边界（页脚从此行开始）
         footer_row = ws.max_row
@@ -1189,7 +1298,7 @@ class Normalizer:
                     if not isinstance(cv, str):
                         continue
                     t = cv.strip()
-                    if _is_step_content(t):
+                    if _is_step_content(t, loose=virtual):
                         texts.append(t)
             step_blocks.append((n, "；".join(texts), (r, r1, c, c1)))
 

@@ -9,6 +9,9 @@
      清单页必须登记"哪一页改了什么"；换图不许增减张数、不许挪位置；
      没有变更栏或栏已写满时走表尾追加登记，重复追加不重建表头（2026-10-22 补）；
      生成侧另测 10 步仍不拆页（证明"步骤不限"没有隐性上限）。
+  5) 无步号工序页（2026-10-22 用户口径"按图＋完整描述为一步"）：按配图锚点分步并换版头，
+     正文逐字未改、每张图归描述在它上方的那一步、完整描述一句不丢；
+     没有配图也没有步号的页维持老行为（告警、不换版头），不许瞎换。
 
 用法：python tests/verify.py        （从任意目录跑都行）
 退出码：0 = 全部通过；非 0 = 有判据失败（打印 FAIL 行）。
@@ -20,6 +23,7 @@ import re
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 指导书工作台\
 sys.path.insert(0, BASE)
@@ -527,6 +531,122 @@ def verify_change_request_fallback(tmp: str):
           f"表头{len(hs)}个")
 
 
+def verify_no_step_mark(tmp: str):
+    """无步号工序页（用户 2026-10-22 口径：按"图＋完整描述"为一步）。
+    以前这种页版头直接不换、提取步骤全空；现在按配图位置分步并换版头，
+    但正文仍然一字不动（硬规则①）。没有配图的页维持老行为，不许瞎换。"""
+    import io
+    from openpyxl.drawing.image import Image as XLImage
+
+    def _png(color):
+        b = io.BytesIO()
+        PILImage.new("RGB", (50, 40), color).save(b, "PNG")
+        b.seek(0)
+        return b
+
+    # 版式：描述紧贴图上方（一步 = 图＋它的完整描述），中间隔空行
+    wb = openpyxl.Workbook()
+    cover = wb.active
+    cover.title = "清单"
+    cover["A1"] = "工序号"
+    cover["A2"] = "ZT-91"
+    ws = wb.create_sheet("ZT-91")
+    ws["A1"] = "DEMO CONTROLS"                       # 版头特征行（往上吞的停止线）
+    ws["A2"] = "作业指导书"
+    ws["A3"] = "文件编号 WI-DEMO-91"
+    ws["A6"] = "检查设备外观是否完好，确认无松动和异响"   # 步骤1描述，紧贴图1上方
+    ws["A13"] = "调整压力表示数到规定值并记录"           # 步骤2描述，紧贴图2上方
+    ws["I5"] = "设备/工夹具"                          # 右侧表格（挡内容区右界）
+    ws["I6"] = "压力表"
+    ws["A25"] = "编制"                               # 页脚起点
+    ws.add_image(XLImage(_png((200, 60, 60))), "A7")
+    ws.add_image(XLImage(_png((60, 60, 200))), "A14")
+    src = os.path.join(tmp, "nostep_src.xlsx")
+    wb.save(src)
+    wb.close()
+
+    out = os.path.join(tmp, "nostep_out.xlsx")
+    wi = normalize_file(src, TEMPLATE, out)
+
+    # 1) 按图分成 2 步
+    proc = wi.processes[0] if wi.processes else None
+    n_steps = len(proc.steps) if proc else 0
+    check("[无步号] 按图＋完整描述认出步骤（2 张图 → 2 步）", n_steps == 2,
+          f"实到 {n_steps} 步")
+
+    src_wb = openpyxl.load_workbook(src)
+    out_wb = openpyxl.load_workbook(out)
+    try:
+        ws_in, ws_out = src_wb["ZT-91"], out_wb["ZT-91"]
+        fsr = _NORMALIZER._first_step_row(ws_in)
+        check("[无步号] 找得到正文起点（从第一张图往上吞描述，空行/版头字样前停）",
+              fsr == 6, f"fsr={fsr}")
+        if fsr:
+            hdr = " ".join(str(c.value) for row in ws_out.iter_rows(min_row=1, max_row=fsr - 1)
+                           for c in row if c.value is not None)
+            check("[无步号] 版头确实被换上去了（以前这种页不换）",
+                  "Working Instruction" in hdr or "作业指导书" in hdr, hdr[:60])
+            check("[无步号] 正文（起点行往下）逐字未改",
+                  body_grid(ws_out, fsr) == body_grid(ws_in, fsr), "")
+            check("[无步号] 图片零丢失",
+                  len(ws_out._images) == len(ws_in._images) == 2,
+                  f"输入 {len(ws_in._images)} → 输出 {len(ws_out._images)}")
+            texts = " ".join(str(c.value) for row in ws_out.iter_rows(min_row=fsr)
+                             for c in row if isinstance(c.value, str))
+            check("[无步号] 两步的描述都没被误当版头删掉",
+                  "检查设备外观是否完好" in texts and "调整压力表示数" in texts, "")
+    finally:
+        src_wb.close()
+        out_wb.close()
+
+    # 2) 步骤—配图配对 + 描述完整：走真实的带图归位链路
+    #    （_parse_old_file_with_images：图片按锚点落进步骤块几何归位）。
+    #    用户口径：一张图＋它的完整描述 = 一步；图归描述在它上方的那一步，
+    #    两步文字各归各、一句不丢（13 字无标点的描述也曾被当成图片说明丢掉）。
+    _NORMALIZER._img_output_dir = Path(os.path.join(tmp, "nostep_imgs"))
+    wb5 = openpyxl.load_workbook(src)
+    try:
+        parsed = _NORMALIZER._parse_old_file_with_images(wb5, [], src)
+        proc = parsed.processes[0] if parsed.processes else None
+        per_step = [len(s.images) for s in proc.steps] if proc else []
+        check("[无步号] 每张图归描述在它上方的那一步（两步各 1 张图）",
+              per_step == [1, 1], f"各步配图数 {per_step}")
+        if proc and len(proc.steps) >= 2:
+            t1, t2 = proc.steps[0].content, proc.steps[1].content
+            check("[无步号] 两步的完整描述都提取到，没被当成图片说明丢掉",
+                  "检查设备外观" in t1 and "调整压力表示数" in t2,
+                  f"步骤1[{t1[:18]}] 步骤2[{t2[:18]}]")
+        else:
+            check("[无步号] 两步的完整描述都提取到，没被当成图片说明丢掉",
+                  False, f"实到 {len(proc.steps) if proc else 0} 步")
+    finally:
+        wb5.close()
+
+    # 没有配图也没有步号的页：维持老行为（告警、不换版头），不许瞎换
+    wb2 = openpyxl.Workbook()
+    cov2 = wb2.active
+    cov2.title = "清单"
+    cov2["A1"] = "工序号"
+    cov2["A2"] = "ZT-92"
+    ws2 = wb2.create_sheet("ZT-92")
+    ws2["A1"] = "DEMO CONTROLS"
+    ws2["A2"] = "文件编号 WI-DEMO-92"
+    ws2["A5"] = "把工件放到工作台上，用压板固定"
+    src2 = os.path.join(tmp, "nostep_noimg.xlsx")
+    wb2.save(src2)
+    wb2.close()
+    out2 = os.path.join(tmp, "nostep_noimg_out.xlsx")
+    normalize_file(src2, TEMPLATE, out2)
+    a = openpyxl.load_workbook(src2)
+    b = openpyxl.load_workbook(out2)
+    try:
+        check("[无步号] 无图无步号的页维持老行为：版头不换、一字不动",
+              _grid(a["ZT-92"]) == _grid(b["ZT-92"]), "")
+    finally:
+        a.close()
+        b.close()
+
+
 def verify_configs(tmp: str):
     cfg_dir = os.path.join(BASE, "configs")
     # 防复发：顶层系列目录名去掉空格后必须唯一。2026-10-22 删过一对
@@ -586,6 +706,7 @@ def main() -> int:
         verify_normalize(tmp)
         verify_change_request(tmp)
         verify_change_request_fallback(tmp)      # 登记兜底路径：无栏/栏满/重复追加
+        verify_no_step_mark(tmp)                 # 无步号页：按图＋完整描述分步并换版头
         verify_configs(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
