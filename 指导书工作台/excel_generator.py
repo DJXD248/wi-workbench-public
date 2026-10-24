@@ -44,9 +44,12 @@ COVER_CELLS = {                     # 封面页版头信息
     "approved_by": "I6", "issued_date": "I7",
     "note": "B4",
 }
-COVER_REVISION_ROWS = range(9, 13)      # A=日期 B(合并B:I)=内容
+COVER_REVISION_FIRST_ROW = 9           # 变更记录首行
+COVER_REVISION_LAST_ROW = 12           # 变更记录末行（模板容量 4 条，超出自动扩容）
+COVER_REVISION_ROWS = range(COVER_REVISION_FIRST_ROW, COVER_REVISION_LAST_ROW + 1)  # A=日期 B(合并B:I)=内容
 COVER_PROCESS_FIRST_ROW = 15            # A=工序号 B(合并B:I)=工位名称 J=工时
-COVER_PROCESS_LAST_ROW = 43             # J44 为 =SUM 公式行
+COVER_PROCESS_LAST_ROW = 43             # J44 为 =SUM 公式行（模板容量 29 个，超出自动扩容）
+COVER_SUM_ROW = 44                      # 合计行（随扩容下移，公式区间同步重写）
 
 PROC_CELLS = {                          # 工序页（新格式）
     "product_spec": "G2",
@@ -157,6 +160,72 @@ class ExcelGenerator:
             print(f"  ⚠ {w}")
         return output_path
 
+    def _insert_cover_rows(self, ws, at: int, count: int, src_row: int) -> None:
+        """在清单封面第 at 行处插入 count 个空行，样式/行高/合并区仿自 src_row。
+
+        为什么不能直接用 ws.insert_rows：openpyxl 的 insert_rows 不搬合并区、
+        不搬行高、不更新公式——封面里的 B:I 数据合并和合计行 SUM 公式会留在
+        原地，数据与版式整体错位。这里全部手工处理：拆合并→从下往上搬
+        （值+逐属性样式+行高）→合并区整体下移恢复→新行仿 src_row 补样式。
+        """
+        if count <= 0 or at < 1:
+            return
+        max_col = ws.max_column
+        max_row = ws.max_row
+
+        def _clone_style(src, dst):
+            if src.has_style:
+                dst.font = copy.copy(src.font)
+                dst.fill = copy.copy(src.fill)
+                dst.border = copy.copy(src.border)
+                dst.alignment = copy.copy(src.alignment)
+                dst.protection = copy.copy(src.protection)
+                dst.number_format = src.number_format
+
+        # 1) 合并区：跨插入点的拉长、整体在插入点下方的下移，先拆后补
+        moved, stretched = [], []
+        for m in list(ws.merged_cells.ranges):
+            if m.min_row >= at:
+                moved.append((m.min_row, m.min_col, m.max_row, m.max_col))
+                ws.unmerge_cells(str(m))
+            elif m.max_row >= at:  # 跨插入点：合并区向下生长 count 行
+                stretched.append((m.min_row, m.min_col, m.max_row, m.max_col))
+                ws.unmerge_cells(str(m))
+
+        # 2) 从下往上搬单元格（值 + 样式 + 行高）；搬空即新行
+        for r in range(max_row, at - 1, -1):
+            for c in range(1, max_col + 1):
+                src, dst = ws.cell(r, c), ws.cell(r + count, c)
+                dst.value = src.value
+                _clone_style(src, dst)
+                src.value = None
+            if ws.row_dimensions[r].height:
+                ws.row_dimensions[r + count].height = ws.row_dimensions[r].height
+
+        # 3) 恢复合并区
+        for r1, c1, r2, c2 in moved:
+            ws.merge_cells(start_row=r1 + count, start_column=c1,
+                           end_row=r2 + count, end_column=c2)
+        for r1, c1, r2, c2 in stretched:
+            ws.merge_cells(start_row=r1, start_column=c1,
+                           end_row=r2 + count, end_column=c2)
+
+        # 4) 新行仿 src_row：逐格样式 + 行高 + 同幅 B:I 合并（若有）
+        span = None
+        for m in ws.merged_cells.ranges:
+            if m.min_row == src_row and m.max_row == src_row and m.min_col == 2:
+                span = (m.min_col, m.max_col)
+                break
+        for i in range(count):
+            r = at + i
+            for c in range(1, max_col + 1):
+                _clone_style(ws.cell(src_row, c), ws.cell(r, c))
+            if ws.row_dimensions[src_row].height:
+                ws.row_dimensions[r].height = ws.row_dimensions[src_row].height
+            if span:
+                ws.merge_cells(start_row=r, start_column=span[0],
+                               end_row=r, end_column=span[1])
+
     # ---------- 封面（清单）页 ----------
     def _fill_cover(self, ws, wi: WorkInstruction, warnings: List[str]):
         h = wi.header
@@ -178,9 +247,15 @@ class ExcelGenerator:
                 ws[coord] = None
 
         capacity = list(COVER_REVISION_ROWS)
-        if len(h.revision_history) > len(capacity):
-            warnings.append(f"变更记录超过 {len(capacity)} 条，封面仅显示前 {len(capacity)} 条")
-        for row, rev in zip(capacity, h.revision_history):
+        # 变更记录超出模板 4 行容量时向下扩容，绝不截断
+        # （用户 2026-10-24 实测：DEMO 文件 13 条变更曾被截成 4 条）。
+        extra_rev = max(0, len(h.revision_history) - len(capacity))
+        if extra_rev:
+            self._insert_cover_rows(ws, COVER_REVISION_LAST_ROW + 1, extra_rev,
+                                    COVER_REVISION_LAST_ROW)
+        for row, rev in zip(range(COVER_REVISION_FIRST_ROW,
+                                  COVER_REVISION_LAST_ROW + 1 + extra_rev),
+                            h.revision_history):
             self._set(ws, f"A{row}", rev.date)
             self._apply_en_font(ws[f"A{row}"])
             text = rev.content
@@ -189,14 +264,32 @@ class ExcelGenerator:
             self._set(ws, f"B{row}", text)
             self._apply_en_font(ws[f"B{row}"])
 
-        rows = range(COVER_PROCESS_FIRST_ROW, COVER_PROCESS_LAST_ROW + 1)
-        if len(wi.processes) > len(rows):
-            warnings.append(f"工序超过 {len(rows)} 个，清单页仅列出前 {len(rows)} 个")
-        for row, p in zip(rows, wi.processes):
+        # 工序清单超出 29 行容量时在合计行之前扩容，合计公式随动重写，
+        # 有幾個工序列幾個（用户 2026-10-24 实测：60+ 工序被截成 29 个）。
+        cap_proc = COVER_PROCESS_LAST_ROW - COVER_PROCESS_FIRST_ROW + 1
+        extra_proc = max(0, len(wi.processes) - cap_proc)
+        if extra_proc:
+            self._insert_cover_rows(ws, COVER_SUM_ROW + extra_rev, extra_proc,
+                                    COVER_PROCESS_LAST_ROW + extra_rev)
+        proc_first = COVER_PROCESS_FIRST_ROW + extra_rev
+        proc_last = COVER_PROCESS_LAST_ROW + extra_rev + extra_proc
+        for row, p in zip(range(proc_first, proc_last + 1), wi.processes):
             self._set(ws, f"A{row}", p.process_no)
             self._set(ws, f"B{row}", p.process_name_cn or p.process_name)
             self._set(ws, f"J{row}", p.work_hours if p.work_hours else None)
             self._apply_en_font(ws[f"B{row}"])
+
+        # 合计行随扩容下移后，SUM 区间同步重写（openpyxl 插行不更新公式）
+        sum_row = COVER_SUM_ROW + extra_rev + extra_proc
+        sum_cell = ws.cell(sum_row, 10)
+        if isinstance(sum_cell.value, str) and sum_cell.value.startswith("=SUM"):
+            sum_cell.value = f"=SUM(J{proc_first}:J{proc_last})"
+        # 行数变多后允许跨页打印，否则 fitToHeight=1 会把整页缩成蚊子版
+        if extra_rev or extra_proc:
+            try:
+                ws.page_setup.fitToHeight = 0
+            except Exception:
+                pass
 
     # ---------- 工序页 ----------
     @staticmethod
@@ -800,6 +893,25 @@ class Normalizer:
         "附属文件", "Accessories",
     )
 
+    # 版头标签字样：字段右侧取到值时的防污染名单。_get_right_cell_value
+    # 会顺延右侧 1-5 格取首个非空——字段本身无值时，抓到的是下一列的
+    # 标签（如"文件编号File NO"），把它回填进新版头就乱套了。
+    # 2026-10-23 用户实测（9STT RC-1）：工位名称无值 → G4 被
+    # "文件编号File NO"污染。
+    _LABEL_WORDS = (
+        "文件编号", "File NO", "工序号", "Working procedure",
+        "工位名称", "Testing part", "产品规格", "Specification",
+        "产品名称", "页码", "Page number", "工时", "Working hour",
+        "编制", "Made by", "审核", "Checked", "批准", "Approved",
+        "Video Number", "检验依据", "劳保用具", "附属文件",
+        "Accessories", "Edition", "版本",
+    )
+
+    @classmethod
+    def _looks_like_label(cls, text: str) -> bool:
+        """取到的"值"是不是下一个标签的字样（顺延抓取污染防护）。"""
+        return any(w in text for w in cls._LABEL_WORDS)
+
     @classmethod
     def _image_anchor_rows(cls, ws) -> list:
         """页面所有配图的锚点行（1-indexed，去重升序）。"""
@@ -932,9 +1044,89 @@ class Normalizer:
             else:
                 cell.value = str(value)
 
+    # ---------- 清单封面：老封面 → 模板新格式封面 ----------
+    @staticmethod
+    def _looks_like_cover(ws) -> bool:
+        """兜底判断第 1 张表是不是清单封面（表名不含「清单」时看 A1）。
+        工序页 A1 是「作业指导书 Working Instruction」，不含「清单/listing」。"""
+        a1 = ws["A1"].value
+        if not isinstance(a1, str):
+            return False
+        low = a1.lower()
+        return "清单" in a1 or "listing" in low or "sop list" in low
+
+    def _copy_sheet(self, ref, ws) -> None:
+        """跨工作簿整表复制（封面用）：值+样式+合并+行高列宽+页面设置。
+
+        样式绝不能直拷 _style——StyleArray 里的 fontId/fillId 等下标是
+        模板簿样式表的，目标簿里没有对应条目，保存时轻则张冠李戴、
+        重则 IndexError 崩在 write_stylesheet（2026-10-22 无步号验收
+        踩过）。逐属性赋值才会把样式重新登记进目标簿的样式表。
+        """
+        for r in range(1, ref.max_row + 1):
+            for c in range(1, ref.max_column + 1):
+                src = ref.cell(r, c)
+                dst = ws.cell(r, c)
+                dst.value = src.value
+                if src.has_style:
+                    dst.font = copy.copy(src.font)
+                    dst.fill = copy.copy(src.fill)
+                    dst.border = copy.copy(src.border)
+                    dst.alignment = copy.copy(src.alignment)
+                    dst.protection = copy.copy(src.protection)
+                    dst.number_format = src.number_format
+            if ref.row_dimensions[r].height:
+                ws.row_dimensions[r].height = ref.row_dimensions[r].height
+        for col, dim in ref.column_dimensions.items():
+            if dim.width:
+                ws.column_dimensions[col].width = dim.width
+        for m in ref.merged_cells.ranges:
+            try:
+                ws.merge_cells(str(m))
+            except Exception:
+                pass
+        try:
+            from openpyxl.worksheet.properties import PageSetupProperties
+            ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 1
+            ws.page_setup.orientation = ref.page_setup.orientation
+            ws.page_setup.paperSize = ref.page_setup.paperSize
+        except Exception:
+            pass
+
+    def _convert_cover(self, wb, tmpl_wb, cover, wi, warnings: List[str]) -> None:
+        """把老清单封面整体换成模板的新格式封面，字段按解析结果回填。
+
+        用户 2026-10-23 实测要求：规范化的文件清单页也要换成新格式
+        （此前封面明确跳过不动）。映射关系：
+          文件编号/版本/编制/审核/批准/发放日期 → I2..I7（_fill_cover）
+          变更记录 → A9 起（模板 4 行，超出自动向下扩容，不截断）
+          工序清单（工序号/工位名称/工时） → A15 起（模板 29 行，超出自动扩容，
+            SUM 合计公式随动重写，不截断）
+        产品规格在新封面没有格子，但已由 _replace_header 写进每张工序页
+        版头 G2，不丢。
+        表名保持原封面名（含「清单」即可被各处识别），位置仍是第 1 张表。
+        """
+        ref = ExcelGenerator._find_sheet(tmpl_wb, COVER_SHEET_KEY)
+        if ref is None:
+            warnings.append("模板缺少清单封面页，封面未转换")
+            return
+        if len(getattr(cover, "_images", [])):
+            warnings.append("老封面带有图片，换新封面后不保留（新封面为模板样式）")
+        old_name = cover.title
+        del wb[old_name]
+        ws = wb.create_sheet(title=old_name, index=0)
+        self._copy_sheet(ref, ws)
+        self.generator._fill_cover(ws, wi, warnings)
+        print(f"  ✓ 清单封面已换为新格式（{old_name}）")
+
     def normalize(self, input_path: str, output_path: str) -> WorkInstruction:
-        """规范化：以源文件为底，仅把顶部版头条替换成参考模板样式，
-        正文（步骤图片+文字+表格+页脚）原样保留——有几步就是几步，绝不截断。"""
+        """规范化：以源文件为底，把清单封面和各工序页版头换成参考模板样式，
+        正文（步骤图片+文字+表格+页脚）原样保留——有几步就是几步，绝不截断。
+
+        封面（清单页）整体替换为模板新格式封面，老封面字段按
+        _parse_header/_parse_revisions/工序列表回填（用户 2026-10-23 实测要求）。"""
         import copy
         print(f"正在规范化（正文原样保留）: {input_path}")
 
@@ -971,6 +1163,11 @@ class Normalizer:
                 ws.page_setup.fitToHeight = 1
             except Exception:
                 pass
+
+        # 清单封面也换成模板新格式（用户 2026-10-23 实测要求）。
+        # 放在工序页循环之后：wi.processes 已收集全，封面工序清单才列得全。
+        if COVER_SHEET_KEY in cover.title or self._looks_like_cover(cover):
+            self._convert_cover(wb, tmpl_wb, cover, wi, warnings)
 
         wb.save(output_path)
         wb.close()
@@ -1080,9 +1277,23 @@ class Normalizer:
         return wi
 
     def _parse_header(self, ws) -> Header:
-        """从版头 sheet 按关键字提取基本信息（只看前 8 行）"""
+        """从版头 sheet 按关键字提取基本信息（只看前 8 行）
+
+        两条防抢字段规则（用户 2026-10-24 实测补）：
+        1. 标签格都是短字样（"文件编号File NO" 12 字），超过 24 字的长文本
+           （变更记录正文等）即使含"版本/编制"字样也不算标签，不许抢字段；
+        2. 同一字段先非空匹配获胜——版头块在表格最上方，后出现的同名文本
+          （如变更表里提到"文件编号"）不能覆盖它。
+        """
         from datetime import datetime, date as pydate
         h = Header()
+        seen = set()  # 已确定取值的字段（Header 有非空默认值，不能靠真假判断）
+
+        def take(field: str, value: str):
+            if value and field not in seen:
+                setattr(h, field, value)
+                seen.add(field)
+
         for row in ws.iter_rows(min_row=1, max_row=min(8, ws.max_row), max_col=15):
             for cell in row:
                 if not cell.value or not isinstance(cell.value, str):
@@ -1091,32 +1302,65 @@ class Normalizer:
                 # 跳过纯日期格（不应作为文本值处理）
                 if re.match(r"^\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}$", val):
                     continue
+                # 长文本不是标签格（变更记录正文动辄半句话）
+                if len(val) > 24:
+                    continue
                 if "文件编号" in val or "File NO" in val:
-                    h.file_no = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:  # 标签和值同格时，取标签字样之后的剩余部分
+                        v = val.replace("文件编号", "").replace("File NO", "").strip()
+                    take("file_no", v)
                 elif "版本" in val or "Edition" in val:
-                    h.edition = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:
+                        v = val.replace("版本", "").replace("Edition", "").strip()
+                    take("edition", v)
                 elif ("产品规格" in val or "Specification" in val) and "名称" not in val:
-                    if not h.product_spec:
-                        h.product_spec = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:
+                        v = val.replace("产品规格", "").replace("Specification", "").strip()
+                    take("product_spec", v)
                 elif "产品名称" in val or "Product Name" in val or "Name" in val and "规格" not in val:
                     v = self._get_right_cell_value(ws, cell.row, cell.column)
                     if v:
                         h.product_spec_cn = v
                 elif "编制" in val or "Made by" in val:
-                    h.made_by = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:
+                        v = val.replace("编制", "").replace("Made by", "").strip()
+                    take("made_by", v)
                 elif "审核" in val or "Checked" in val:
-                    h.checked_by = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:
+                        v = val.replace("审核", "").replace("Checked by", "").strip()
+                    take("checked_by", v)
                 elif "批准" in val or "Approved" in val:
-                    h.approved_by = self._get_right_cell_value(ws, cell.row, cell.column)
+                    v = self._get_right_cell_value(ws, cell.row, cell.column)
+                    if not v:
+                        v = val.replace("批准", "").replace("Approved by", "").strip()
+                    take("approved_by", v)
                 elif "发放日期" in val or "Issued" in val:
-                    h.issued_date = self._get_right_cell_value(ws, cell.row, cell.column)
+                    take("issued_date",
+                         self._get_right_cell_value(ws, cell.row, cell.column,
+                                                    allow_date=True))
         return h
 
     def _parse_revisions(self, ws) -> List[RevisionRecord]:
-        """同一行内「日期格 + 右侧文本格」视为一条变更记录"""
+        """同一行内「日期格 + 右侧文本格」视为一条变更记录。
+
+        扫描范围覆盖整张变更表（老封面变更表动辄 10+ 条，2026-10-24 实测
+        DEMO 文件 13 条曾被截成 4 条）；遇到工序汇总表头（工序号/Working
+        procedure）即停，不会把工序行误认成变更记录。解析结果不再截断，
+        封面容量由 _fill_cover 动态扩容兜底。
+        """
         from datetime import datetime, date
         revs = []
-        for row in ws.iter_rows(min_row=4, max_row=min(12, ws.max_row), max_col=6):
+        skip_kw = ("内容变更", "日期Date", "发放日期", "Issued")
+        for row in ws.iter_rows(min_row=4, max_row=min(ws.max_row, 80), max_col=10):
+            first = row[0].value if row else None
+            if isinstance(first, str) and ("工序号" in first
+                                           or "Working procedure" in first):
+                break  # 到工序汇总表了，变更表结束
             date_cell = next((c for c in row
                               if isinstance(c.value, (datetime, date))
                               or (isinstance(c.value, str)
@@ -1130,24 +1374,33 @@ class Normalizer:
                 v = c.value
                 if (c is not date_cell and v
                         and not isinstance(v, (datetime, date))
-                        and "内容变更" not in str(v)):
+                        and not any(k in str(v) for k in skip_kw)):
                     content = str(v).strip()
                     break
             if content:
                 d = date_cell.value
                 ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d).strip()
                 revs.append(RevisionRecord(date=ds, content=content[:200], author=""))
-        return revs[:4]
+        return revs
 
-    def _get_right_cell_value(self, ws, row: int, col: int) -> str:
-        """获取右侧 1-5 格内第一个有意义的非空值（跳过日期/数字）"""
+    def _get_right_cell_value(self, ws, row: int, col: int,
+                              allow_date: bool = False) -> str:
+        """获取右侧 1-5 格内第一个有意义的非空值（跳过日期/数字）
+
+        allow_date=True 时日期格也当值返回（格式化成 YYYY/M/D）——
+        发放日期在真实文件里常以日期类型存储，旧逻辑直接跳过导致
+        该字段整体丢失（用户 2026-10-24 实测）。
+        """
         from datetime import datetime, date as pydate
         for c in range(col + 1, min(col + 6, ws.max_column + 1)):
             cell = ws.cell(row=row, column=c)
             if cell.value is None:
                 continue
-            # 跳过纯日期值（转为字符串会污染目标字段）
+            # 跳过纯日期值（转为字符串会污染目标字段）；allow_date 时放行
             if isinstance(cell.value, (datetime, pydate)):
+                if allow_date:
+                    d = cell.value
+                    return f"{d.year}/{d.month}/{d.day}"
                 continue
             # 跳过纯数字（工时等应通过专门字段提取）
             if isinstance(cell.value, (int, float)):
@@ -1196,24 +1449,30 @@ class Normalizer:
                 if re.match(r"^\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}$", val):
                     continue
 
-                # 工序号（仅在 G4 没拿到时才从此路径解析）
-                if not found_no:
-                    if "工序号" in val or "Working procedure" in val and "NO" in val:
-                        v = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
-                        if v and not v.isdigit():
-                            p.process_no, found_no = v, True
-                elif "工位名称" in val or "Testing part" in val:
-                    p.process_name_cn = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
-                elif "工时" in val and "hour" in val.lower():
+                # 工序号（仅在 G4 没拿到时才从此路径解析；只认第一个）
+                if not found_no and ("工序号" in val
+                                     or ("Working procedure" in val and "NO" in val)):
+                    v = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
+                    if v and not v.isdigit() and not self._looks_like_label(v):
+                        p.process_no, found_no = v, True
+                # 工位名称/工时与工序号谁先出现无关，必须各自独立匹配：
+                # 旧版写成 if found_no 的 elif 链，工时标签排在工序号前面的文件
+                # （实测 9STT RC-1：工时在第2行、工序号在第3行）会被整段跳过，
+                # 规范化后新版头工时、工位名称双双丢值——2026-10-23 用户实测。
+                # 右侧取值再加 _looks_like_label 防护：字段无值时顺延抓到的是
+                # 下一个标签（如"文件编号File NO"），不能回填进新版头。
+                if "工位名称" in val or "Testing part" in val:
+                    v = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
+                    if v and not self._looks_like_label(v):
+                        p.process_name_cn = v
+                if "工时" in val and "hour" in val.lower():
                     wh = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
-                    if wh:
+                    if wh and not self._looks_like_label(wh):
                         # 尝试提取数字部分作为工时
                         nums = re.findall(r"\d+", wh)
                         if nums:
                             p.work_hours = int(nums[0])
-                            p.work_hours_display = wh
-                        else:
-                            p.work_hours_display = wh
+                        p.work_hours_display = wh
 
         # ---------- 3. 收集所有步骤文字 ----------
         STEP_SECTION_LABELS = (
