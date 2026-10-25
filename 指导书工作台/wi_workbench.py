@@ -272,6 +272,26 @@ class SubTableFrame(ttk.LabelFrame):
                 self.on_change()
 
 
+# 「工具箱 → 快速操作」的按钮表。提到模块级是为了无头可测：
+# tests/verify.py 直接 import 本常量做断言（12 项、文字不重、方法名都真实存在），
+# 不依赖 GUI 即可防止"加/改/删按钮时漏改或排布倒退"。
+# 条目为（按钮文字, App 方法名）；方法名在构建时用 getattr(self, name) 解析。
+QUICK_ACTIONS: list[tuple[str, str]] = [
+    ("生成演示示例文件（DEMOB + 焊接）", "run_demo"),
+    ("校验当前填写内容", "run_validate"),
+    ("导入视频自动抽帧（生成带图步骤草稿）", "import_video"),
+    ("自动创建工序（视频抽帧 +AI 起草）", "auto_create_process"),
+    ("AI 模型配置（添加自定义大模型 API）", "ai_model_config"),
+    ("AI 起草步骤文字（看当前工序配图写文字）", "run_ai_draft"),
+    ("导入图纸参数（从工程图/BOM表提取 QC Items）", "import_blueprint"),
+    ("导入图纸全参（物料+设备+QC 自动填入三表）", "import_blueprint_full"),
+    ("清理素材（删除本文件用过的帧图和视频）", "cleanup_media"),
+    ("清理全部测试文件（视频+抽帧+测试输出）", "cleanup_all_test_files"),
+    ("同步进度到云端看板", "sync_progress"),
+    ("打开输出目录 成品/", "open成品_dir"),
+]
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -420,10 +440,30 @@ class App(tk.Tk):
         self.proc_index = -1
 
     def _build_tools_tab(self):
-        tab = ttk.Frame(self.nb, padding=16)
+        tab = ttk.Frame(self.nb)
         self.nb.add(tab, text="  3. 工具箱  ")
 
-        g1 = ttk.LabelFrame(tab, text="规范化同事发来的旧文件", padding=10)
+        # 内容超出窗口时纵向可滚：小屏幕/大字体下按钮不再被窗口边缘裁掉
+        # （2026-10-24 用户实测：快速操作 12 个按钮 + 上面两个框总高约 730px，
+        #  超出 1180x780 窗口可用高度，"同步进度到云端看板"等底部按钮不可见）
+        qcanvas = tk.Canvas(tab, borderwidth=0, highlightthickness=0)
+        qsb = ttk.Scrollbar(tab, orient="vertical", command=qcanvas.yview)
+        qcanvas.configure(yscrollcommand=qsb.set)
+        qsb.pack(side="right", fill="y")
+        qcanvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(qcanvas, padding=16)
+        qwin = qcanvas.create_window((0, 0), window=inner, anchor="nw")
+        self.tools_canvas = qcanvas  # 防 GC，并便于后续扩展
+
+        def _qsync(_e=None):
+            qcanvas.configure(scrollregion=qcanvas.bbox("all"))
+
+        inner.bind("<Configure>", _qsync)
+        qcanvas.bind("<Configure>", lambda e: qcanvas.itemconfigure(qwin, width=e.width))
+        self.bind_all("<MouseWheel>",
+                      lambda e: qcanvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        g1 = ttk.LabelFrame(inner, text="规范化同事发来的旧文件", padding=10)
         g1.pack(fill="x", pady=(0, 12))
         ttk.Label(g1, text="旧文件：").grid(row=0, column=0, sticky="e")
         self.norm_in = tk.StringVar()
@@ -437,7 +477,7 @@ class App(tk.Tk):
                    command=self.run_normalize).grid(row=2, column=1, sticky="w", pady=(8, 0))
         g1.columnconfigure(1, weight=1)
 
-        g1b = ttk.LabelFrame(tab, text="一句话需求（大白话批量改，改完自动登记变更）", padding=10)
+        g1b = ttk.LabelFrame(inner, text="一句话需求（大白话批量改，改完自动登记变更）", padding=10)
         g1b.pack(fill="x", pady=(0, 12))
         ttk.Label(g1b, text="要改的文件：").grid(row=0, column=0, sticky="e")
         self.cr_in = tk.StringVar()
@@ -455,20 +495,15 @@ class App(tk.Tk):
                    command=self.run_change_request).grid(row=3, column=1, sticky="w", pady=(8, 0))
         g1b.columnconfigure(1, weight=1)
 
-        g2 = ttk.LabelFrame(tab, text="快速操作", padding=10)
+        g2 = ttk.LabelFrame(inner, text="快速操作", padding=10)
         g2.pack(fill="x")
-        ttk.Button(g2, text="生成演示示例文件（DEMOB + 焊接）", command=self.run_demo).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="校验当前填写内容", command=self.run_validate).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="导入视频自动抽帧（生成带图步骤草稿）", command=self.import_video).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="自动创建工序（视频抽帧 +AI 起草）", command=self.auto_create_process).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="AI 模型配置（添加自定义大模型 API）", command=self.ai_model_config).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="AI 起草步骤文字（看当前工序配图写文字）", command=self.run_ai_draft).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="导入图纸参数（从工程图/BOM表提取 QC Items）", command=self.import_blueprint).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="导入图纸全参（物料+设备+QC 自动填入三表）", command=self.import_blueprint_full).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="清理素材（删除本文件用过的帧图和视频）", command=self.cleanup_media).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="清理全部测试文件（视频+抽帧+测试输出）", command=self.cleanup_all_test_files).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="同步进度到云端看板", command=self.sync_progress).pack(anchor="w", pady=2)
-        ttk.Button(g2, text="打开输出目录 成品/", command=self.open成品_dir).pack(anchor="w", pady=2)
+        # 两列排布（按 QUICK_ACTIONS 顺序行优先）：默认视图即可看全全部按钮，
+        # 更小的屏幕再配合上面的滚动条
+        for i, (text, name) in enumerate(QUICK_ACTIONS):
+            r, c = divmod(i, 2)
+            ttk.Button(g2, text=text, command=getattr(self, name)).grid(
+                row=r, column=c, sticky="w", padx=(0, 8), pady=2)
+        g2.columnconfigure((0, 1), weight=1)
 
     # ---------- 文档载入 ----------
     def load_doc_into_ui(self, doc: dict):

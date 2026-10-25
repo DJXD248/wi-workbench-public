@@ -836,6 +836,37 @@ def verify_configs(tmp: str):
     check(f"[配置库] 全部配置可生成（{ok} 份通过，{skipped} 份空配置跳过）", True, "")
 
 
+def verify_ui_quick_actions():
+    """工具箱「快速操作」按钮表门禁（2026-10-24 用户实测"底部按钮被窗口裁掉"修复后新增）。
+
+    不依赖 GUI/Excel：直接 import wi_workbench 读模块级 QUICK_ACTIONS 常量
+    与 _build_tools_tab 源码，断言——
+      1) 恰 12 个按钮（历史全量功能，一个不能少也不能多）；
+      2) 按钮文字互不重复；
+      3) 每个条目声明的 App 方法真实存在（构建时 getattr 不会 AttributeError）；
+      4) 排布是两列（divmod 行优先），且带 Canvas 纵向滚动容器＋滚轮绑定——
+         防止有人图省事改回单列纵排，把小屏幕上又被裁回来。
+    """
+    import inspect
+
+    import wi_workbench as wiw
+
+    qa = wiw.QUICK_ACTIONS
+    check("[UI] 快速操作按钮恰 12 个", len(qa) == 12, f"实际 {len(qa)} 个")
+    texts = [t for t, _ in qa]
+    dup = sorted({t for t in texts if texts.count(t) > 1})
+    check("[UI] 按钮文字互不重复", not dup, "; ".join(dup))
+    missing = [f"「{t}」→{n}" for t, n in qa
+               if not callable(getattr(wiw.App, n, None))]
+    check("[UI] 每个按钮声明的 App 方法真实存在", not missing, "; ".join(missing))
+    body = inspect.getsource(wiw.App._build_tools_tab)
+    check("[UI] 快速操作按两列排布（divmod 行优先）", "divmod(i, 2)" in body)
+    check("[UI] 工具箱页带纵向滚动容器＋滚轮绑定（小屏不裁切）",
+          "tk.Canvas(tab" in body and "MouseWheel" in body)
+    check("[UI] 构建取自模块级 QUICK_ACTIONS（非内联散列表）",
+          "QUICK_ACTIONS" in body and "quick_actions = [" not in body)
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="wi_verify_")
     try:
@@ -854,6 +885,7 @@ def main() -> int:
         verify_change_request_fallback(tmp)      # 登记兜底路径：无栏/栏满/重复追加
         verify_no_step_mark(tmp)                 # 无步号页：按图＋完整描述分步并换版头
         verify_configs(tmp)
+        verify_ui_quick_actions()          # 工具箱按钮表：12 项两列排布＋滚动容器
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
