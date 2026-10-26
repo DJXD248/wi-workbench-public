@@ -27,9 +27,15 @@ def load_config(app_dir) -> dict:
     if not p.exists():
         raise SyncError(f"未找到同步配置文件：{p}\n（应由维护人员放在程序同目录）")
     try:
-        cfg = json.loads(p.read_text(encoding="utf-8"))
+        text = p.read_text(encoding="utf-8")
+        # 容忍配置文件里混入的不可见控制字符（如从网页/微信/文档复制时带入的
+        # 裸 0x00/0x0b/0x0c 等）。这类字符会让 json.loads 直接抛错并导致整个
+        # 同步崩在「同步配置文件读取失败」。url/token 里不会含有意义的控制字符，
+        # 一律剔除（仅保留换行/回车/制表）即可恢复解析。
+        text = "".join(ch for ch in text if ch >= " " or ch in "\n\r\t")
+        cfg = json.loads(text)
     except Exception as e:
-        raise SyncError(f"同步配置文件读取失败：{e}")
+        raise SyncError(f"同步配置文件读取失败：{e}（若由复制粘贴产生，请排查其中的不可见控制字符）")
     if not cfg.get("url") or not cfg.get("token"):
         raise SyncError("同步配置缺少 url 或 token")
     return cfg

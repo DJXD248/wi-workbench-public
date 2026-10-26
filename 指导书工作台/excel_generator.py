@@ -1089,13 +1089,95 @@ class Normalizer:
             from openpyxl.worksheet.properties import PageSetupProperties
             ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
             ws.page_setup.fitToWidth = 1
-            ws.page_setup.fitToHeight = 1
+            # 封面含多行工序/变更清单，必须允许竖向跨页，否则 fitToHeight=1
+            # 会把整页缩成「蚊子版」，右侧 I–L 版头（工时/页码/文件编号/工序号）被切掉
+            ws.page_setup.fitToHeight = 0
             ws.page_setup.orientation = ref.page_setup.orientation
             ws.page_setup.paperSize = ref.page_setup.paperSize
         except Exception:
             pass
 
-    def _convert_cover(self, wb, tmpl_wb, cover, wi, warnings: List[str]) -> None:
+    @staticmethod
+    def _capture_variant_table(cover, input_path=None):
+        """从老封面右侧捕获「变体表」（产品编号/工时/备注等），原样保留到新封面。
+
+        返回 (top_row, { (r,c): (value, font, fill, border, alignment, num_fmt, protection) },
+        {col_letter: width})；没找到返回 None。
+
+        判定：在 K:M 列（11..13）找表头行——K 列含「编号/变体/型号」且同行
+        L 列含「工时」或 M 列含「备注/说明」，即视为变体表起点。向下收集到
+        连续两行全空为止（兼容表头+若干数据行的紧凑布局）。样式从 cover 取；
+        值优先用 data_only 读取（变体表工时列常是公式如 =247+50+30+64+25，
+        须取显示值 416/436，否则搬过去的是公式），源文件带缓存值时生效。
+        """
+        import copy as _copy
+        from openpyxl.utils import get_column_letter
+        # data_only 读取计算值（公式→显示值）；样式仍从 cover 取（两load样式一致）
+        dov_cover = None
+        if input_path:
+            try:
+                dov_wb = openpyxl.load_workbook(input_path, data_only=True)
+                for ws in dov_wb.worksheets:
+                    if ws.title == cover.title:
+                        dov_cover = ws
+                        break
+            except Exception:
+                dov_cover = None
+
+        def _val(r, c):
+            if dov_cover is not None:
+                v = dov_cover.cell(r, c).value
+                if v is not None:
+                    return v
+            return cover.cell(r, c).value
+
+        found = None
+        for r in range(1, min(cover.max_row, 30) + 1):
+            k = _val(r, 11)
+            if isinstance(k, str) and any(w in k for w in ("编号", "变体", "型号")):
+                l = _val(r, 12)
+                m = _val(r, 13)
+                if (isinstance(l, str) and "工时" in l) or (
+                        isinstance(m, str) and ("备注" in m or "说明" in m)):
+                    found = r
+                    break
+        if not found:
+            return None
+        hr = found
+        widths = {}
+        for c in (11, 12, 13):
+            cl = get_column_letter(c)
+            d = cover.column_dimensions.get(cl)
+            if d and d.width:
+                widths[cl] = d.width
+        data = {}
+        r = hr
+        empty_streak = 0
+        while r <= cover.max_row and empty_streak < 2:
+            vals = [_val(r, 11), _val(r, 12), _val(r, 13)]
+            if all(v is None for v in vals):
+                empty_streak += 1
+                r += 1
+                continue
+            empty_streak = 0
+            for c in (11, 12, 13):
+                cell = cover.cell(r, c)  # 样式从非data_only表取
+                data[(r, c)] = (
+                    _val(r, c),
+                    _copy.copy(cell.font) if cell.has_style else None,
+                    _copy.copy(cell.fill) if cell.has_style else None,
+                    _copy.copy(cell.border) if cell.has_style else None,
+                    _copy.copy(cell.alignment) if cell.has_style else None,
+                    cell.number_format,
+                    _copy.copy(cell.protection) if cell.has_style else None,
+                )
+            r += 1
+        if not data:
+            return None
+        return hr, data, widths
+
+    def _convert_cover(self, wb, tmpl_wb, cover, wi, warnings: List[str],
+                       input_path=None) -> None:
         """把老清单封面整体换成模板的新格式封面，字段按解析结果回填。
 
         用户 2026-10-23 实测要求：规范化的文件清单页也要换成新格式
@@ -1104,6 +1186,8 @@ class Normalizer:
           变更记录 → A9 起（模板 4 行，超出自动向下扩容，不截断）
           工序清单（工序号/工位名称/工时） → A15 起（模板 29 行，超出自动扩容，
             SUM 合计公式随动重写，不截断）
+          变体表（产品编号/工时/备注）→ 老封面右侧 K:M 原样搬回新封面右侧
+            （用户 2025-12-16 拍板保留）
         产品规格在新封面没有格子，但已由 _replace_header 写进每张工序页
         版头 G2，不丢。
         表名保持原封面名（含「清单」即可被各处识别），位置仍是第 1 张表。
@@ -1112,6 +1196,8 @@ class Normalizer:
         if ref is None:
             warnings.append("模板缺少清单封面页，封面未转换")
             return
+        # 先抓老封面右侧变体表（删除旧表前），换完封面再贴回右侧
+        variant = self._capture_variant_table(cover, input_path)
         if len(getattr(cover, "_images", [])):
             warnings.append("老封面带有图片，换新封面后不保留（新封面为模板样式）")
         old_name = cover.title
@@ -1119,6 +1205,30 @@ class Normalizer:
         ws = wb.create_sheet(title=old_name, index=0)
         self._copy_sheet(ref, ws)
         self.generator._fill_cover(ws, wi, warnings)
+        # 变体表贴回新封面右侧（仅当封面未因超额扩容插行、行号未错位时）
+        if variant:
+            hr, data, widths = variant
+            extra_rev = max(0, len(wi.header.revision_history)
+                            - len(COVER_REVISION_ROWS))
+            cap_proc = COVER_PROCESS_LAST_ROW - COVER_PROCESS_FIRST_ROW + 1
+            extra_proc = max(0, len(wi.processes) - cap_proc)
+            if extra_rev == 0 and extra_proc == 0:
+                for cl, w in widths.items():
+                    ws.column_dimensions[cl].width = w
+                for (r, c), (value, font, fill, border, alignment,
+                             num_fmt, protection) in data.items():
+                    cell = ws.cell(r, c)
+                    cell.value = value
+                    if font is not None:
+                        cell.font = font
+                        cell.fill = fill
+                        cell.border = border
+                        cell.alignment = alignment
+                        cell.number_format = num_fmt
+                        cell.protection = protection
+                print(f"  ✓ 封面变体表已保留至右侧（K{hr}:M）")
+            else:
+                warnings.append("封面变更/工序超额扩容，变体表行号可能错位，已跳过贴回")
         print(f"  ✓ 清单封面已换为新格式（{old_name}）")
 
     def normalize(self, input_path: str, output_path: str) -> WorkInstruction:
@@ -1144,30 +1254,41 @@ class Normalizer:
         wi.header.revision_history = self._parse_revisions(cover)
 
         warnings: List[str] = []
+        # 附件类页面（可选项/附件/资料/参考/变体/附录/选项）：正文与版头照常
+        # 保留，但【不计入封面工序清单】——用户 2025-12-16 实测明确要求
+        # 「附件页（1可选项等）不需要在清单页列出」。按标题关键词排除，
+        # 因为所有页（含附件页）都有步骤标记，无法靠「有无步骤」区分。
+        ATTACH_KW = ("附件", "可选项", "资料", "参考", "变体", "附录", "选项")
         for ws in wb.worksheets:
             if ws is cover or COVER_SHEET_KEY in ws.title:
                 continue
             p = self._parse_process_sheet(ws)
             if not p or not (p.process_no or p.process_name_cn):
                 continue
-            wi.add_process(p)
+            is_attach = any(kw in ws.title for kw in ATTACH_KW)
             fsr = self._first_step_row(ws)
             if not fsr or fsr <= 1:
-                warnings.append(f"工序 {p.process_no} 未找到步骤起始行，版头未替换")
+                warnings.append(f"工序 {p.process_no or ws.title} 未找到步骤起始行，版头未替换")
                 continue
+            # 版头无论是否附件都换成标准样式（否则新旧版头混排，且门禁要求
+            # 所有工序页版头已换）。附件页仅不进封面清单。
             self._replace_header(ws, ref, fsr, ref_hdr_rows, wi, p, copy)
             try:
                 from openpyxl.worksheet.properties import PageSetupProperties
                 ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
                 ws.page_setup.fitToWidth = 1
-                ws.page_setup.fitToHeight = 1
+                # 解竖向压缩：fitToHeight=1 会把整页缩进单页导致右侧 I–L 版头被切，
+                # 改为 0 让高度自然流动（同 _fill_cover 的既有意图，仅补齐规范化路径）
+                ws.page_setup.fitToHeight = 0
             except Exception:
                 pass
+            if not is_attach:
+                wi.add_process(p)
 
         # 清单封面也换成模板新格式（用户 2026-10-23 实测要求）。
         # 放在工序页循环之后：wi.processes 已收集全，封面工序清单才列得全。
         if COVER_SHEET_KEY in cover.title or self._looks_like_cover(cover):
-            self._convert_cover(wb, tmpl_wb, cover, wi, warnings)
+            self._convert_cover(wb, tmpl_wb, cover, wi, warnings, input_path)
 
         wb.save(output_path)
         wb.close()
@@ -1348,6 +1469,12 @@ class Normalizer:
     def _parse_revisions(self, ws) -> List[RevisionRecord]:
         """同一行内「日期格 + 右侧文本格」视为一条变更记录。
 
+        支持双列变更表：一行内可能并排两对（如 A/B 一对 + D/E 一对）。
+        旧逻辑每行只取「首个」日期格，会把第二对（右列）整对漏掉——
+        ZT 样本 2025-12-08「ZT-2工序工时36秒修改为100秒」因此丢失。
+        现改为收集本行【所有】日期格，逐格取其右侧到下一个日期格之间的
+        首个文本，一对不漏。
+
         扫描范围覆盖整张变更表（老封面变更表动辄 10+ 条，2026-10-24 实测
         DEMO 文件 13 条曾被截成 4 条）；遇到工序汇总表头（工序号/Working
         procedure）即停，不会把工序行误认成变更记录。解析结果不再截断，
@@ -1356,31 +1483,33 @@ class Normalizer:
         from datetime import datetime, date
         revs = []
         skip_kw = ("内容变更", "日期Date", "发放日期", "Issued")
+        date_pat = re.compile(r"^\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}")
         for row in ws.iter_rows(min_row=4, max_row=min(ws.max_row, 80), max_col=10):
             first = row[0].value if row else None
             if isinstance(first, str) and ("工序号" in first
                                            or "Working procedure" in first):
                 break  # 到工序汇总表了，变更表结束
-            date_cell = next((c for c in row
-                              if isinstance(c.value, (datetime, date))
-                              or (isinstance(c.value, str)
-                                  and re.match(r"^\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}",
-                                               c.value.strip()))),
-                             None)
-            if not date_cell:
+            cells = list(row)
+            # 收集本行所有日期格（0-indexed 位置）
+            date_pos = [i for i, c in enumerate(cells)
+                        if isinstance(c.value, (datetime, date))
+                        or (isinstance(c.value, str)
+                            and date_pat.match(c.value.strip()))]
+            if not date_pos:
                 continue
-            content = ""
-            for c in row[date_cell.column:]:
-                v = c.value
-                if (c is not date_cell and v
-                        and not isinstance(v, (datetime, date))
-                        and not any(k in str(v) for k in skip_kw)):
-                    content = str(v).strip()
-                    break
-            if content:
-                d = date_cell.value
-                ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d).strip()
-                revs.append(RevisionRecord(date=ds, content=content[:200], author=""))
+            for di, i in enumerate(date_pos):
+                nxt = date_pos[di + 1] if di + 1 < len(date_pos) else len(cells)
+                content = ""
+                for c in cells[i + 1:nxt]:
+                    v = c.value
+                    if (v and not isinstance(v, (datetime, date))
+                            and not any(k in str(v) for k in skip_kw)):
+                        content = str(v).strip()
+                        break
+                if content:
+                    d = cells[i].value
+                    ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d).strip()
+                    revs.append(RevisionRecord(date=ds, content=content[:200], author=""))
         return revs
 
     def _get_right_cell_value(self, ws, row: int, col: int,
