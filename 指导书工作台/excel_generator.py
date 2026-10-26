@@ -81,6 +81,11 @@ PROC_QC_ROWS = range(29, 32)        # I=项目 K=标准 L=参数
 # 页脚三栏签署（模板原为五栏，重排为 编制/审核/批准）
 PROC_SIGN_GROUPS = [(1, 3, "Made by编制"), (5, 7, "Checked by审核"),
                     (9, 11, "Approved by批准")]   # (标签起始列号, 值起始列号, 标签)
+# 一页版式的近似行数上限：工序页 max_row 不超过它时视为「约一页内容」，
+# 打印设 fitToHeight=1 缩进单页——页脚不会溢出成只有两行签字的废页
+# （2026-10-26 ZT 实测 35 页里 8 页是这种孤页）；超过则 fitToHeight=0
+# 允许跨页，长工序硬压单页会把版头纵向压缩（B1/B3 修过的现象）。
+ONE_PAGE_MAX_ROW = 45
 
 _EN_LETTER = re.compile(r"[A-Za-z]")
 
@@ -126,7 +131,11 @@ class ExcelGenerator:
 
         used = set(wb.sheetnames)
         keep = {cover}
-        for process in wi.processes:
+        for page_no, process in enumerate(wi.processes, 1):
+            # 版头页码按工序顺序递增：解析从不产 page_no，Process.page_no
+            # 默认又是 1，不重编的话每一页版头都标「1」（2026-10-26 ZT 实测
+            # 27 页全为 1）
+            process.page_no = page_no
             ws = wb.copy_worksheet(proc_tmpl)
             ws.title = self._unique_sheet_name(process.process_no, used)
             self._fill_process_sheet(ws, wi, process, warnings)
@@ -1259,6 +1268,8 @@ class Normalizer:
         # 「附件页（1可选项等）不需要在清单页列出」。按标题关键词排除，
         # 因为所有页（含附件页）都有步骤标记，无法靠「有无步骤」区分。
         ATTACH_KW = ("附件", "可选项", "资料", "参考", "变体", "附录", "选项")
+        page_seq = 0        # 版头页码：按页在文档中的顺序递增
+        seen_proc_no = {}   # 工序号 -> 首次出现的 sheet 名（重复检测用）
         for ws in wb.worksheets:
             if ws is cover or COVER_SHEET_KEY in ws.title:
                 continue
@@ -1272,14 +1283,40 @@ class Normalizer:
                 continue
             # 版头无论是否附件都换成标准样式（否则新旧版头混排，且门禁要求
             # 所有工序页版头已换）。附件页仅不进封面清单。
+            # 页码重编：解析从不产 page_no，Process.page_no 默认又是 1，
+            # 不重编的话每一页版头都标「1」（2026-10-26 ZT 实测 27 页全为 1）。
+            # 附件页也是一页纸，同样编号。
+            page_seq += 1
+            p.page_no = page_seq
+            # 重复工序号检测：只对「两页都会进封面清单」的组合警告——
+            # 附件页不进清单（A3），与正文页同号不算清单重复
+            if (not is_attach and p.process_no
+                    and p.process_no in seen_proc_no):
+                warnings.append(
+                    f"工序号 {p.process_no} 在「{seen_proc_no[p.process_no]}」和"
+                    f"「{ws.title}」两页重复出现，封面清单会各登记一行，请人工确认")
+            elif not is_attach and p.process_no:
+                seen_proc_no[p.process_no] = ws.title
             self._replace_header(ws, ref, fsr, ref_hdr_rows, wi, p, copy)
             try:
                 from openpyxl.worksheet.properties import PageSetupProperties
                 ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
                 ws.page_setup.fitToWidth = 1
-                # 解竖向压缩：fitToHeight=1 会把整页缩进单页导致右侧 I–L 版头被切，
-                # 改为 0 让高度自然流动（同 _fill_cover 的既有意图，仅补齐规范化路径）
-                ws.page_setup.fitToHeight = 0
+                # 清除源文件遗留的打印区域：实测样本自带 Print_Area=$A$1:$H$40，
+                # 右侧 I–L 版头（工时/页码/文件编号/工序号）正好被排除在打印
+                # 区外——数据都在，打印/导 PDF 时整块消失（2026-10-26 ZT 实测
+                # 16 页中招）。清掉后打印范围回到整个使用区域。
+                try:
+                    ws.print_area = None
+                except Exception:
+                    pass
+                # fitToHeight 按需：fitToHeight=0 让高度自然流动，但「略超一页」
+                # 的工序页会把页脚（编制/审核/批准）挤成只有两行字的孤页
+                # （2026-10-26 ZT 实测 35 页里 8 页是废页）；近一页内容改回
+                # fitToHeight=1 缩进单页消废页，真正多页的长工序仍保持 0
+                # 允许跨页（硬压单页会把版头纵向压缩，B1/B3 修过的现象）。
+                ws.page_setup.fitToHeight = (1 if ws.max_row <= ONE_PAGE_MAX_ROW
+                                             else 0)
             except Exception:
                 pass
             if not is_attach:
@@ -1597,10 +1634,17 @@ class Normalizer:
                 if "工时" in val and "hour" in val.lower():
                     wh = self._get_right_cell_value(ws, r_idx + 1, col_idx + 1)
                     if wh and not self._looks_like_label(wh):
-                        # 尝试提取数字部分作为工时
-                        nums = re.findall(r"\d+", wh)
-                        if nums:
-                            p.work_hours = int(nums[0])
+                        # 版头工时可能是算式（实测 ZT-2 写「45*2+10=100S」）：
+                        # 优先取等号右侧的结果值，否则清单里填 45、版头却显示
+                        # 100S，自相矛盾（2026-10-26 ZT 实测）。无等号
+                        # （如「20S」）才取首个数字。
+                        m_eq = re.search(r"=\s*(\d+(?:\.\d+)?)", str(wh))
+                        if m_eq:
+                            p.work_hours = int(float(m_eq.group(1)))
+                        else:
+                            nums = re.findall(r"\d+", str(wh))
+                            if nums:
+                                p.work_hours = int(nums[0])
                         p.work_hours_display = wh
 
         # ---------- 3. 收集所有步骤文字 ----------
