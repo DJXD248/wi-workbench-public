@@ -508,9 +508,15 @@ class App(tk.Tk):
             self._qa_buttons[name] = b
         g2.columnconfigure((0, 1), weight=1)
 
-        # 探测器接入按钮的状态提示（无探测器时红字、按钮灰置）
+        # 探测器接入按钮的状态提示（无探测器时红字、按钮灰置）。
+        # 注意：g2 里按钮全部用 grid 管理，这里也必须 grid（同一容器混用
+        # pack/grid 会抛 TclError"grid is already managing its content
+        # windows"，2026-10-28 用户实测启动即崩）。
         self._detector_hint = tk.Label(g2, text="", fg="red",
                                        wraplength=640, justify="left")
+        self._detector_hint.grid(row=(len(QUICK_ACTIONS) + 1) // 2,
+                                 column=0, columnspan=2, sticky="w",
+                                 pady=(4, 0))
         self._apply_detector_button_state()
 
     # ---------- 文档载入 ----------
@@ -1427,13 +1433,11 @@ class App(tk.Tk):
                 text="⚠ 未检测到「免费大模型自动探测器」：此按钮已禁用。\n"
                      "请把探测器放在工作台同目录后重启工作台。",
                 fg="red")
-            self._detector_hint.pack(fill="x", pady=(4, 0))
         else:
             if btn:
                 btn.configure(state="normal")
             self._detector_hint.configure(
                 text=f"已检测到探测器：{d}", fg="#0a7d2b")
-            self._detector_hint.pack(fill="x", pady=(4, 0))
 
     def run_ai_draft(self):
         if getattr(self, "_ai_busy", False):

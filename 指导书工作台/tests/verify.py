@@ -875,6 +875,11 @@ def verify_ui_quick_actions():
     check("[UI] 「一键接入探测器」按钮方法真实存在",
           callable(getattr(wiw.App, "connect_detector_models", None)),
           "App.connect_detector_models 未定义")
+    # 2026-10-28 用户实测启动崩溃：状态提示 Label 曾用 pack 放进全是 grid
+    # 按钮的 LabelFrame，Tk 同容器禁止混用几何管理器 → TclError。门禁钉死。
+    check("[UI] 探测器提示 Label 用 grid 管理（禁止 pack/grid 混用）",
+          "_detector_hint.grid(" in body and "_detector_hint.pack(" not in body,
+          "构建函数里 _detector_hint 不得调用 pack()")
 
 
 def main() -> int:
