@@ -130,7 +130,7 @@ def detector_candidates(family: str = "vision", on_note=None) -> list:
             "请先双击「免费大模型自动探测器」，在「设置 → 填写 API key」里"
             "粘贴 key 并保存，再回来点这个按钮。")
 
-    out = []
+    out_vision, out_rest = [], []
     curated = _read_json(d / "给Qoder的免费模型清单.json")
     if curated:
         prov_path = d / "providers.json"
@@ -150,34 +150,51 @@ def detector_candidates(family: str = "vision", on_note=None) -> list:
                 mid = m.get("id")
                 if not mid:
                     continue
-                if family == "vision":
-                    vis = m.get("vision")
-                    if isinstance(vis, dict):
-                        pass  # 探测器已联网验证过能看图
-                    elif probe.is_vision_model(mid) and _is_chat_vision(mid):
-                        pass
-                    else:
-                        continue
-                out.append({"name": ch.get("name", kid),
-                            "base_url": base_url,
-                            "key": keys[kid], "model": mid})
+                item = {"name": ch.get("name", kid),
+                        "base_url": base_url,
+                        "key": keys[kid], "model": mid}
+                if family != "vision":
+                    out_vision.append(item)
+                    continue
+                vis = m.get("vision")
+                if isinstance(vis, dict) or (
+                        probe.is_vision_model(mid) and _is_chat_vision(mid)):
+                    out_vision.append(item)  # 探测器已联网验证过能看图
+                else:
+                    # 免费但未验证看图：降级候选（StepDrafter 会自动跳过失败的）
+                    out_rest.append(item)
 
-    if not out:
-        # 回退：用 providers.json 的 free_rule + probe_model（离线、可能只含文本模型）
+    if not out_vision:
+        # 回退：离线解析 providers.json。free_rule 的模型名直接写在规则里
+        # （official:glm-4.6v-flash,...），而 providers.json 不带 models 字段
+        # （models 是联网探测的产物、离线永远为空）——所以必须从规则本身
+        # 取模型名。2026-10-28 用户实测：老安装包没有免费模型清单、回退又
+        # 没解析规则，导致"一键接入"报"没有可用的免费模型"。
         for p in probe.load_providers(d / "providers.json"):
             kid = p["id"]
             if kid not in keys:
                 continue
-            models = (probe.free_models_of(p.get("models", []), p.get("free_rule"))
-                      or ([p["probe_model"]] if p.get("probe_model") else []))
-            for mid in models[:3]:
+            rule = p.get("free_rule") or ""
+            models = []
+            if rule.startswith("official:"):
+                models = [m.strip() for m in rule.split(":", 1)[1].split(",")
+                          if m.strip()]
+            probe_m = p.get("probe_model") or ""
+            if probe_m and probe_m not in models:
+                models.append(probe_m)
+            for mid in models[:4]:
+                item = {"name": p.get("name", kid),
+                        "base_url": p["base_url"],
+                        "key": keys[kid], "model": mid}
                 if family == "vision" and not (
                         probe.is_vision_model(mid) and _is_chat_vision(mid)):
-                    continue
-                out.append({"name": p.get("name", kid),
-                            "base_url": p["base_url"],
-                            "key": keys[kid], "model": mid})
+                    out_rest.append(item)
+                else:
+                    out_vision.append(item)
 
+    # 验证过看图的排前面；免费但未验证的垫底兜底（StepDrafter 逐个尝试、
+    # 失败自动换下一个，所以垫底候选无副作用、只会多一分成功率）
+    out = out_vision + out_rest
     if not out:
         raise DraftError(
             "探测器里录入的渠道没有可用的免费模型（可能是 free_rule 未配置或模型清单缺失）。\n"
