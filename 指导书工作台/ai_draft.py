@@ -80,6 +80,119 @@ def load_custom_models() -> list:
     return result
 
 
+def find_detector_dir() -> "Path | None":
+    """定位随包附带的「免费大模型自动探测器」目录。
+
+    与 load_keys 的回退路径一致：探测器是工作台同目录下的 `大模型探测`
+    子文件夹（发布包里就自带它）。找不到返回 None。
+    """
+    base = probe.HERE
+    cand = base / "大模型探测"
+    return cand if cand.is_dir() else None
+
+
+def _read_json(path) -> dict:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def detector_candidates(family: str = "vision", on_note=None) -> list:
+    """一键接入探测器「已录入的免费模型」，离线返回 AI 候选（不联网探测）。
+
+    数据来源：
+      - `大模型探测/keys.json`：用户在探测器里「设置 → 填写 API key」录入的 key，
+        按 provider id 存。只有录入了 key 的渠道才会被接入。
+      - `大模型探测/给Qoder的免费模型清单.json`：探测器已联网核实过的免费模型清单，
+        每条模型带 `free` 标记与 `vision`/`chat` 验证结果——这是离线拿免费模型名的权威来源。
+    若清单缺失，回退到 `大模型探测/providers.json` 的 free_rule + probe_model。
+
+    返回 [{name, base_url, key, model}, ...]，结构与 vision_candidates 一致，
+    可直接喂给 StepDrafter / BlueprintParser。
+    """
+    d = find_detector_dir()
+    if d is None:
+        raise DraftError(
+            "未检测到「免费大模型自动探测器」目录（应与工作台同目录）。")
+
+    raw_keys = _read_json(d / "keys.json") or {}
+    # 过滤掉空值/纯空白/示例占位（探测器 keys.example.json 里写的是"请把…填在这里"）
+    keys = {}
+    for k, v in raw_keys.items():
+        if isinstance(v, str):
+            v = v.strip()
+        if v and not v.startswith("请把"):
+            keys[k] = v
+    if not keys:
+        raise DraftError(
+            "探测器目录存在，但还没录入任何 key。\n\n"
+            "请先双击「免费大模型自动探测器」，在「设置 → 填写 API key」里"
+            "粘贴 key 并保存，再回来点这个按钮。")
+
+    out = []
+    curated = _read_json(d / "给Qoder的免费模型清单.json")
+    if curated:
+        prov_path = d / "providers.json"
+        providers = probe.load_providers(prov_path) if prov_path.exists() else []
+        pmap = {p["id"]: p for p in providers}
+        for ch in curated.get("channels", []):
+            kid = ch.get("id")
+            if kid not in keys:
+                continue  # 只接入用户已录入 key 的渠道
+            prov = pmap.get(kid, {})
+            base_url = ch.get("base_url") or prov.get("base_url", "")
+            if not base_url:
+                continue
+            for m in ch.get("models", []):
+                if not m.get("free"):
+                    continue
+                mid = m.get("id")
+                if not mid:
+                    continue
+                if family == "vision":
+                    vis = m.get("vision")
+                    if isinstance(vis, dict):
+                        pass  # 探测器已联网验证过能看图
+                    elif probe.is_vision_model(mid) and _is_chat_vision(mid):
+                        pass
+                    else:
+                        continue
+                out.append({"name": ch.get("name", kid),
+                            "base_url": base_url,
+                            "key": keys[kid], "model": mid})
+
+    if not out:
+        # 回退：用 providers.json 的 free_rule + probe_model（离线、可能只含文本模型）
+        for p in probe.load_providers(d / "providers.json"):
+            kid = p["id"]
+            if kid not in keys:
+                continue
+            models = (probe.free_models_of(p.get("models", []), p.get("free_rule"))
+                      or ([p["probe_model"]] if p.get("probe_model") else []))
+            for mid in models[:3]:
+                if family == "vision" and not (
+                        probe.is_vision_model(mid) and _is_chat_vision(mid)):
+                    continue
+                out.append({"name": p.get("name", kid),
+                            "base_url": p["base_url"],
+                            "key": keys[kid], "model": mid})
+
+    if not out:
+        raise DraftError(
+            "探测器里录入的渠道没有可用的免费模型（可能是 free_rule 未配置或模型清单缺失）。\n"
+            "可改用「AI 模型配置」手动添加自定义模型。")
+
+    # 与 vision_candidates 行为一致：把用户自定义模型也并进来
+    out.extend(load_custom_models())
+    if on_note:
+        note = f"已接入探测器 {len(out)} 个免费模型（离线，无需重新探测）"
+        if any(c.get("type") == "custom" for c in out):
+            note += "（含自定义模型）"
+        on_note(note)
+    return out
+
+
 def vision_candidates(on_note=None) -> list:
     """探测全部渠道，返回按可用度排序的看图模型候选：
     [{name, base_url, key, model}, ...]"""

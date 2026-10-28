@@ -841,18 +841,20 @@ def verify_ui_quick_actions():
 
     不依赖 GUI/Excel：直接 import wi_workbench 读模块级 QUICK_ACTIONS 常量
     与 _build_tools_tab 源码，断言——
-      1) 恰 12 个按钮（历史全量功能，一个不能少也不能多）；
+      1) 恰 13 个按钮（历史全量功能，一个不能少也不能多）；
       2) 按钮文字互不重复；
       3) 每个条目声明的 App 方法真实存在（构建时 getattr 不会 AttributeError）；
       4) 排布是两列（divmod 行优先），且带 Canvas 纵向滚动容器＋滚轮绑定——
          防止有人图省事改回单列纵排，把小屏幕上又被裁回来。
+      5) 含「一键接入探测器已录入的免费模型」按钮（connect_detector_models），
+         其灰置/红字逻辑依赖该方法存在。
     """
     import inspect
 
     import wi_workbench as wiw
 
     qa = wiw.QUICK_ACTIONS
-    check("[UI] 快速操作按钮恰 12 个", len(qa) == 12, f"实际 {len(qa)} 个")
+    check("[UI] 快速操作按钮恰 13 个", len(qa) == 13, f"实际 {len(qa)} 个")
     texts = [t for t, _ in qa]
     dup = sorted({t for t in texts if texts.count(t) > 1})
     check("[UI] 按钮文字互不重复", not dup, "; ".join(dup))
@@ -865,6 +867,14 @@ def verify_ui_quick_actions():
           "tk.Canvas(tab" in body and "MouseWheel" in body)
     check("[UI] 构建取自模块级 QUICK_ACTIONS（非内联散列表）",
           "QUICK_ACTIONS" in body and "quick_actions = [" not in body)
+    det = [n for t, n in qa if n == "connect_detector_models"]
+    check("[UI] 存在「一键接入探测器」按钮条目", len(det) == 1,
+          f"匹配到 {len(det)} 条（应恰 1 条）")
+    check("[UI] 「一键接入探测器」按钮文字含「探测器」关键词",
+          any("探测器" in t for t, n in qa if n == "connect_detector_models"))
+    check("[UI] 「一键接入探测器」按钮方法真实存在",
+          callable(getattr(wiw.App, "connect_detector_models", None)),
+          "App.connect_detector_models 未定义")
 
 
 def main() -> int:

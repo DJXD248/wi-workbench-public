@@ -282,6 +282,7 @@ QUICK_ACTIONS: list[tuple[str, str]] = [
     ("导入视频自动抽帧（生成带图步骤草稿）", "import_video"),
     ("自动创建工序（视频抽帧 +AI 起草）", "auto_create_process"),
     ("AI 模型配置（添加自定义大模型 API）", "ai_model_config"),
+    ("一键接入探测器已录入的免费模型", "connect_detector_models"),
     ("AI 起草步骤文字（看当前工序配图写文字）", "run_ai_draft"),
     ("导入图纸参数（从工程图/BOM表提取 QC Items）", "import_blueprint"),
     ("导入图纸全参（物料+设备+QC 自动填入三表）", "import_blueprint_full"),
@@ -499,11 +500,18 @@ class App(tk.Tk):
         g2.pack(fill="x")
         # 两列排布（按 QUICK_ACTIONS 顺序行优先）：默认视图即可看全全部按钮，
         # 更小的屏幕再配合上面的滚动条
+        self._qa_buttons = {}
         for i, (text, name) in enumerate(QUICK_ACTIONS):
             r, c = divmod(i, 2)
-            ttk.Button(g2, text=text, command=getattr(self, name)).grid(
-                row=r, column=c, sticky="w", padx=(0, 8), pady=2)
+            b = ttk.Button(g2, text=text, command=getattr(self, name))
+            b.grid(row=r, column=c, sticky="w", padx=(0, 8), pady=2)
+            self._qa_buttons[name] = b
         g2.columnconfigure((0, 1), weight=1)
+
+        # 探测器接入按钮的状态提示（无探测器时红字、按钮灰置）
+        self._detector_hint = tk.Label(g2, text="", fg="red",
+                                       wraplength=640, justify="left")
+        self._apply_detector_button_state()
 
     # ---------- 文档载入 ----------
     def load_doc_into_ui(self, doc: dict):
@@ -1388,6 +1396,44 @@ class App(tk.Tk):
     def open成品_dir(self):
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         reveal_in_folder(OUTPUT_DIR)
+
+    def connect_detector_models(self):
+        """一键接入同目录「免费大模型自动探测器」已录入的免费模型。
+
+        离线读取探测器的 keys.json + 免费模型清单，把候选直接写入 self._ai_cands，
+        后续 AI 起草/图纸解析即用这些模型，不再走 60 秒实时探测。
+        探测器缺失或没录入 key 时由 ai_draft 抛 DraftError，这里转成提示。
+        """
+        import ai_draft
+        try:
+            cands = ai_draft.detector_candidates(
+                "vision", lambda s: self.status.set("探测器：" + s))
+        except Exception as e:
+            messagebox.showerror("接入失败", str(e))
+            return
+        self._ai_cands = cands
+        self.status.set(
+            f"已接入探测器 {len(cands)} 个免费模型，AI 功能将直接使用，无需重新探测。")
+
+    def _apply_detector_button_state(self):
+        """根据同目录是否有探测器，决定「一键接入」按钮是否可用，并给红字提示。"""
+        import ai_draft
+        d = ai_draft.find_detector_dir()
+        btn = self._qa_buttons.get("connect_detector_models")
+        if d is None:
+            if btn:
+                btn.configure(state="disabled")
+            self._detector_hint.configure(
+                text="⚠ 未检测到「免费大模型自动探测器」：此按钮已禁用。\n"
+                     "请把探测器放在工作台同目录后重启工作台。",
+                fg="red")
+            self._detector_hint.pack(fill="x", pady=(4, 0))
+        else:
+            if btn:
+                btn.configure(state="normal")
+            self._detector_hint.configure(
+                text=f"已检测到探测器：{d}", fg="#0a7d2b")
+            self._detector_hint.pack(fill="x", pady=(4, 0))
 
     def run_ai_draft(self):
         if getattr(self, "_ai_busy", False):
